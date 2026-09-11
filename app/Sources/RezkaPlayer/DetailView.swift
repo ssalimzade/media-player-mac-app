@@ -572,6 +572,7 @@ struct DetailView: View {
             }
             await refetch()
         } catch {
+            if state.autoplayPage == item.url { state.autoplayPage = nil }
             loadError = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }
     }
@@ -640,7 +641,13 @@ struct DetailView: View {
             }
             // Play is the likely next click: have the link ready for the player.
             if let q = currentQuality(s), let url = s.url(for: q) { state.warmStream(url) }
+            // Picked on the phone remote: go straight into the player.
+            if state.autoplayPage == item.url, let target = playerTarget(s) {
+                state.autoplayPage = nil
+                state.pendingPlayer = target
+            }
         } catch {
+            if state.autoplayPage == item.url { state.autoplayPage = nil }
             guard streamRequestID == myID else { return }
             streamError = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }

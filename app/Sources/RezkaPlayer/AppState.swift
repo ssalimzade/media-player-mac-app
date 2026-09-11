@@ -189,6 +189,7 @@ final class AppState: ObservableObject {
     func boot() {
         sidecar.start()
         requestNotificationAuthorizationIfPossible()
+        updatePhoneRemote()
     }
 
     /// Ask once for permission to post local notifications (download-finished alerts).
@@ -340,6 +341,81 @@ final class AppState: ObservableObject {
             if pages.count == 4 { break }
         }
         pages.forEach(prefetchTitle)
+    }
+
+    // MARK: Phone remote
+
+    /// Serve the phone remote (see `PhoneRemote`) on the local network.
+    @AppStorage("phoneRemoteEnabled") var phoneRemoteEnabled: Bool = true {
+        didSet { objectWillChange.send(); updatePhoneRemote() }
+    }
+    /// The secret in the remote's link; "New link" replaces it, retiring old links.
+    @AppStorage("phoneRemoteKey") private var phoneRemoteKey: String = ""
+    /// The port the remote listens on once it's up (nil while off, or if it couldn't get one).
+    @Published private(set) var phoneRemotePort: UInt16?
+    private var remoteServer: RemoteServer?
+
+    lazy var phoneRemote: PhoneRemote = {
+        let remote = PhoneRemote()
+        remote.app = self
+        return remote
+    }()
+
+    /// The link the phone opens (shown as a QR code in Settings).
+    var phoneRemoteURL: String? {
+        guard let port = phoneRemotePort, let ip = LANAddress.primaryIPv4() else { return nil }
+        return "http://\(ip):\(port)/?k=\(phoneRemoteKey)"
+    }
+
+    /// The same link by this Mac's Bonjour name, which survives the LAN IP changing.
+    var phoneRemoteBonjourURL: String? {
+        guard let port = phoneRemotePort, let host = RemoteServer.bonjourHost else { return nil }
+        return "http://\(host):\(port)/?k=\(phoneRemoteKey)"
+    }
+
+    func updatePhoneRemote() {
+        guard phoneRemoteEnabled else {
+            remoteServer?.stop()
+            remoteServer = nil
+            phoneRemotePort = nil
+            return
+        }
+        guard remoteServer == nil else { return }
+        if phoneRemoteKey.isEmpty { phoneRemoteKey = Self.newRemoteKey() }
+        phoneRemote.key = phoneRemoteKey
+        let remote = phoneRemote
+        let server = RemoteServer(handler: { remote.handle($0) },
+                                  onPort: { [weak self] port in self?.phoneRemotePort = port })
+        remoteServer = server
+        server.start()
+    }
+
+    /// Replace the remote's link; phones holding the old one get turned away.
+    func newPhoneRemoteLink() {
+        phoneRemoteKey = Self.newRemoteKey()
+        phoneRemote.key = phoneRemoteKey
+        objectWillChange.send()
+    }
+
+    private static func newRemoteKey() -> String {
+        let alphabet = Array("abcdefghjkmnpqrstuvwxyz23456789")
+        return String((0..<10).map { _ in alphabet.randomElement()! })
+    }
+
+    /// A title the title page should start playing as soon as its stream is ready — set when the
+    /// phone remote picks something from Continue Watching.
+    var autoplayPage: String?
+    /// A player for RootView to push (the autoplay above).
+    @Published var pendingPlayer: PlayerTarget?
+
+    /// Open a title from the phone remote and play it where it was left off.
+    func playFromRemote(pageURL: String) {
+        let last = progress.latestForPage(pageURL)
+        autoplayPage = pageURL
+        pendingItem = CatalogueItem(
+            title: last?.title.components(separatedBy: " · ").first ?? "", url: pageURL,
+            image: last?.posterURL, rating: nil, category: nil, info: nil, postId: nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// For a remote CDN URL, return the URL playback/downloads should actually hit:

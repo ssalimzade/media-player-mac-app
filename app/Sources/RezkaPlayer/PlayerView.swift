@@ -8,6 +8,10 @@ struct PlayerView: View {
     @State private var player: AVPlayer?
     /// What the controls drawn over the video show (episode bar, skip countdown, notices).
     @StateObject private var overlay = PlayerOverlayModel()
+    /// Pops this player off the navigation stack (the phone remote's Close).
+    @Environment(\.dismiss) private var dismiss
+    /// Identifies this player to the phone remote, so a leaving player only detaches itself.
+    @State private var remoteID = UUID()
 
     // Progress / autoplay bookkeeping. These track the *currently playing* item, which can
     // advance past the pushed target when autoplay chains episodes.
@@ -90,6 +94,7 @@ struct PlayerView: View {
         curDownloadID = target.downloadID
         curTitle = target.title
         wireOverlay()
+        attachRemote()
 
         guard let item = makeItem(cdnURLString: target.urlString, isLocal: target.isLocal) else { return }
         let p = AVPlayer(playerItem: item)
@@ -117,6 +122,7 @@ struct PlayerView: View {
         readyObserver?.cancel(); readyObserver = nil
         externalObserver?.cancel(); externalObserver = nil
         swapReadyObserver?.cancel(); swapReadyObserver = nil
+        state.phoneRemote.detach(id: remoteID)
         overlay.detach()
     }
 
@@ -632,6 +638,59 @@ struct PlayerView: View {
         }
     }
 
+    // MARK: Phone remote
+
+    /// Let the phone remote (see `PhoneRemote`) see and drive this player while it's on screen.
+    private func attachRemote() {
+        state.phoneRemote.attach(.init(id: remoteID, snapshot: { remoteSnapshot() },
+                                       perform: { remoteCommand($0) }))
+    }
+
+    private func remoteSnapshot() -> PhoneRemote.NowPlaying {
+        let d = player?.currentItem?.duration.seconds ?? 0
+        let t = player?.currentTime().seconds ?? 0
+        return .init(
+            title: target.seriesName ?? (curTitle.isEmpty ? target.title : curTitle),
+            episode: currentRef?.tag, poster: target.posterURL,
+            playing: (player?.rate ?? 0) != 0,
+            position: t.isFinite ? max(0, t) : 0, duration: d.isFinite ? d : 0,
+            volume: player?.volume ?? 1,
+            canPrevious: neighbour(-1) != nil, canNext: neighbour(+1) != nil,
+            skip: overlay.skip.map { $0.kind == .intro ? "intro" : "credits" },
+            skipProgress: overlay.skip?.progress,
+            autoSkip: state.autoSkip, airplay: isExternal, fullScreen: overlay.isFullScreen)
+    }
+
+    private func remoteCommand(_ command: PhoneRemote.Command) {
+        guard let p = player else { return }
+        switch command {
+        case .toggle: if p.rate == 0 { p.play() } else { p.pause() }
+        case .seek(let by): remoteSeek(p, to: p.currentTime().seconds + by)
+        case .seekTo(let t): remoteSeek(p, to: t)
+        case .previous: if let ref = neighbour(-1) { jump(to: ref) }
+        case .next: advanceToNextEpisode()
+        case .skip: skipNow()
+        case .cancelSkip: cancelSkip()
+        case .volume(let v): p.volume = min(1, max(0, v))
+        case .autoSkip(let on): state.autoSkip = on
+        case .fullScreen: overlay.toggleFullScreen()
+        case .close:
+            // Leave AVKit's full screen first; popping the view mid-transition strands its window.
+            if overlay.isFullScreen {
+                overlay.toggleFullScreen()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { dismiss() }
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    private func remoteSeek(_ p: AVPlayer, to t: Double) {
+        let d = p.currentItem?.duration.seconds ?? 0
+        let target = d.isFinite && d > 1 ? min(t, d - 1) : t
+        p.seek(to: CMTime(seconds: max(0, target), preferredTimescale: 600))
+    }
+
     // MARK: On-video controls
 
     private func refreshOverlay() {
@@ -668,10 +727,37 @@ private struct AVPlayerViewContainer: NSViewRepresentable {
         view.allowsPictureInPicturePlayback = true
         view.showsFullScreenToggleButton = true
         view.videoGravity = .resizeAspect
+        view.delegate = context.coordinator
         if let content = view.contentOverlayView {
             PlayerOverlayHost.install(in: content, model: overlay)
         }
+        overlay.toggleFullScreen = { [weak view, weak overlay] in
+            guard let view else { return }
+            // AVKit's own full-screen actions (what its button sends). They aren't in the public
+            // headers, so check first; the fallback full-screens the whole window instead.
+            let action = NSSelectorFromString(overlay?.isFullScreen == true ? "exitFullScreen:" : "enterFullScreen:")
+            if view.responds(to: action) {
+                view.perform(action, with: nil)
+            } else {
+                view.window?.toggleFullScreen(nil)
+            }
+        }
         return view
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(overlay: overlay) }
+
+    /// Keeps `overlay.isFullScreen` current, for the phone remote's Full Screen button.
+    final class Coordinator: NSObject, AVPlayerViewDelegate {
+        let overlay: PlayerOverlayModel
+        init(overlay: PlayerOverlayModel) { self.overlay = overlay }
+
+        func playerViewDidEnterFullScreen(_ playerView: AVPlayerView) {
+            MainActor.assumeIsolated { overlay.isFullScreen = true }
+        }
+        func playerViewDidExitFullScreen(_ playerView: AVPlayerView) {
+            MainActor.assumeIsolated { overlay.isFullScreen = false }
+        }
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {

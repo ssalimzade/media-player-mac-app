@@ -93,7 +93,7 @@ Persist JSON to `~/Library/Application Support/RezkaPlayer/` (login cookies go t
 | `Keychain.swift` | macOS Keychain | HDRezka session cookies |
 
 `AppState` re-publishes each store's `objectWillChange` (sinks in `init()`), holds `@AppStorage`
-prefs (`hdrezkaOrigin`, `proxyURL`, `preferredQuality`, `hideWatched`, `autoSkipIntroCredits`, `hdrezkaEmail`), and exposes
+prefs (`hdrezkaOrigin`, `proxyURL`, `preferredQuality`, `hideWatched`, `autoSkipIntroCredits`, `phoneRemoteEnabled`, `hdrezkaEmail`), and exposes
 `login/logout`, `pushProxyConfig`, and `playbackURLString(for:)` (relay rewriting). Sidebar sections
 are an enum in `RootView.swift` (`sectionRoot` switch). The menu bar + notification auth live in
 `RezkaPlayerApp.swift` / `DownloadManager.swift`.
@@ -208,6 +208,28 @@ cold title ~0.4–0.5 s, a stream ~0.15 s, anything cached ~1 ms):
 - **Don't publish per tick.** Every store re-publishes through `AppState`, so any store change
   re-renders the whole app: download progress is throttled to 2/s (and not written to disk per
   tick), and `ProgressStore` keeps indexes rather than scanning ≤2000 entries per poster.
+
+### Phone remote
+
+For watching on a TV over HDMI (a Mac has no HDMI-CEC, so the TV remote can't reach it):
+`PhoneRemote` + `RemoteServer` + `RemotePage` serve a self-contained web page from **the app
+itself** (Network.framework `NWListener`, port 47821, or the next free one) to a phone on the
+same Wi-Fi. It's in Swift rather than the sidecar because every command needs the live player.
+
+- **Pairing:** every request except `/icon.png` must carry `?k=<key>` (`phoneRemoteKey` in
+  UserDefaults). Settings → Phone remote shows the link as a QR code, plus a Bonjour-name variant,
+  and "New link" rotates the key. Toggle: `phoneRemoteEnabled`.
+- **API:** the page polls `GET /api/state` (Now Playing + Continue Watching) every second and
+  sends `POST /api/cmd {cmd, value?|on?|url?}`: toggle, seek, seekTo, previous, next, skip,
+  cancelSkip, volume, autoSkip, fullScreen, close, open.
+- **Player:** the `PlayerView` on screen registers a snapshot/command handle
+  (`attachRemote`/`detach`); commands act on its `AVPlayer`, so they work over AirPlay too.
+  Full screen uses AVPlayerView's `enterFullScreen:`/`exitFullScreen:` (not in the public
+  headers, so guarded by `responds(to:)`, falling back to the window) and tracks the state via
+  `AVPlayerViewDelegate`. Close leaves full screen first, then `dismiss()`es.
+- **Open from the phone:** `AppState.playFromRemote` resets the navigation path, pushes the title
+  (`pendingItem`) and sets `autoplayPage`; once that `DetailView` has its stream it pushes the
+  player through `pendingPlayer`.
 
 ## Anubis anti-bot gateway
 

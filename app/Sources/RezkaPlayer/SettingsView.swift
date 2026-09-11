@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreImage.CIFilterBuiltins
 
 struct SettingsView: View {
     @EnvironmentObject var state: AppState
@@ -97,6 +98,41 @@ struct SettingsView: View {
                      + "streamed episodes this fetches a few minutes of each episode's start and "
                      + "end at the lowest quality, once; downloaded episodes need no extra data.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Phone remote") {
+                Toggle("Control playback from your phone", isOn: $state.phoneRemoteEnabled)
+                if state.phoneRemoteEnabled {
+                    if let url = state.phoneRemoteURL {
+                        HStack(alignment: .top, spacing: 16) {
+                            if let qr = Self.qrCode(url) {
+                                Image(nsImage: qr).interpolation(.none).resizable()
+                                    .frame(width: 132, height: 132)
+                                    .padding(8)
+                                    .background(.white, in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Scan this with your phone's camera — the phone has to be on the "
+                                     + "same Wi-Fi as this Mac. Then Share › Add to Home Screen keeps "
+                                     + "the remote one tap away.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text(url).font(.caption.monospaced()).textSelection(.enabled)
+                                if let bonjour = state.phoneRemoteBonjourURL {
+                                    Text("Keeps working if the Mac's IP changes: \(bonjour)")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                Button("New link") { state.newPhoneRemoteLink() }
+                                    .help("Make a new link; phones with the old one can no longer control playback")
+                            }
+                        }
+                    } else if state.phoneRemotePort == nil {
+                        Text("Starting…").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Connect this Mac to Wi-Fi or Ethernet to use the phone remote.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section("Storage") {
@@ -263,6 +299,19 @@ struct SettingsView: View {
                 loginError = (error as? APIError)?.errorDescription ?? error.localizedDescription
             }
         }
+    }
+
+    /// A crisp QR code for `text` (scaled up by whole pixels; drawn without smoothing).
+    private static func qrCode(_ text: String) -> NSImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let image = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        else { return nil }
+        let rep = NSCIImageRep(ciImage: image)
+        let ns = NSImage(size: rep.size)
+        ns.addRepresentation(rep)
+        return ns
     }
 
     private func byteString(_ bytes: Int64) -> String {

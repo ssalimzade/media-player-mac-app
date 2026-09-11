@@ -31,6 +31,12 @@ final class PlayerOverlayModel: ObservableObject {
     var onCancelSkip: () -> Void = {}
     var onToggleAutoSkip: (Bool) -> Void = { _ in }
 
+    /// Whether AVKit's player is in full screen (kept current by `AVPlayerViewContainer`).
+    var isFullScreen = false
+    /// Enter/leave AVKit's full screen (installed by `AVPlayerViewContainer`) — for the phone
+    /// remote, which can't reach AVKit's own button.
+    var toggleFullScreen: () -> Void = {}
+
     /// Fade the picture to black (true) or back (false) over `duration`, then call `done`.
     /// Installed by `PlayerOverlayHost`; a skip dips through black so it reads as a cut.
     var setBlackout: (_ on: Bool, _ duration: TimeInterval, _ done: (() -> Void)?) -> Void = { _, _, done in
@@ -71,6 +77,7 @@ final class PlayerOverlayModel: ObservableObject {
     func detach() {
         onPrevious = {}; onNext = {}; onSelect = { _ in }
         onSkipNow = {}; onCancelSkip = {}; onToggleAutoSkip = { _ in }
+        toggleFullScreen = {}
         hideControls?.cancel(); hideToast?.cancel()
     }
 }

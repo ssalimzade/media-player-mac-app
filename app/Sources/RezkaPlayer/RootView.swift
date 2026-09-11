@@ -125,8 +125,15 @@ struct RootView: View {
         }
         .onChange(of: state.pendingItem) { _, newValue in
             guard let item = newValue else { return }
+            // A phone-remote pick replaces whatever's open (a playing episode saves on the way out).
+            if state.autoplayPage == item.url { path = NavigationPath() }
             path.append(item)
             state.pendingItem = nil
+        }
+        .onChange(of: state.pendingPlayer) { _, newValue in
+            guard let target = newValue else { return }
+            path.append(target)
+            state.pendingPlayer = nil
         }
     }
 
