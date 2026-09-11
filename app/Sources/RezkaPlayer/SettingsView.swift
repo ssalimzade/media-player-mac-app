@@ -92,7 +92,7 @@ struct SettingsView: View {
             Section("Playback") {
                 Toggle("Skip intros and credits automatically", isOn: $state.autoSkip)
                 Text("Finds each series' intro and closing credits by comparing the sound of "
-                     + "neighbouring episodes, then skips them after a 3-second countdown — the "
+                     + "neighbouring episodes, then skips them after a 5-second countdown — the "
                      + "credits go straight to the next episode. Works over AirPlay too. For "
                      + "streamed episodes this fetches a few minutes of each episode's start and "
                      + "end at the lowest quality, once; downloaded episodes need no extra data.")

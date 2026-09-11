@@ -173,10 +173,13 @@ tolerating ~1.5 s gaps (voice-over across the theme). No ffmpeg/chromaprint to b
   auto-advance has markers ready. One pair comparison yields markers for both episodes.
   Fingerprints cache per episode + translation in `Fingerprints/`; "checked, nothing found" is
   stored too so it isn't redone (network failures aren't).
-- `PlayerView.checkSkips` (0.25 s ticks) shows a 3 s countdown in media time (pausing pauses it),
-  then seeks past the intro or, for credits, runs the end-of-episode path (mark finished → next).
-  Cancel leaves that episode alone. The seek is on the `AVPlayer`, so it works over AirPlay — but the
-  countdown is drawn on the Mac only. `autoSkipIntroCredits` off = no detection/fetching at all.
+- `PlayerView.checkSkips` (0.25 s ticks) shows a Netflix-style "Skip Intro" / "Next Episode"
+  button that fills up over a 5 s countdown in media time (pausing pauses it; ✕ cancels for that
+  episode), then **cuts**: picture (a `FadeView` in the content overlay) and volume ease out
+  (~0.35 s) and back in (~0.6 s) around the seek — or, for credits, around the switch to the next episode, revealed when
+  its item is ready (8 s failsafe). The seek is on the `AVPlayer`, so it works over AirPlay — but
+  the button and fade are drawn on the Mac only. `autoSkipIntroCredits` off = no
+  detection/fetching at all (a plain Skip button still shows where markers exist).
 
 ## Anubis anti-bot gateway
 

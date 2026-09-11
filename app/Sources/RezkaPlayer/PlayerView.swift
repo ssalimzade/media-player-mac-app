@@ -41,6 +41,9 @@ struct PlayerView: View {
     @State private var creditsDone = false
     /// The credits countdown and the real end of the item can both fire; only act once.
     @State private var endHandled = false
+    /// After a credits skip dipped to black: brings picture and sound back once the next
+    /// episode's item is ready.
+    @State private var pendingReveal: (() -> Void)?
 
     var body: some View {
         Group {
@@ -200,7 +203,10 @@ struct PlayerView: View {
         readyObserver = item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { status in
-                if status == .readyToPlay { self.seekResumeIfNeeded(item: item) }
+                if status == .readyToPlay {
+                    self.seekResumeIfNeeded(item: item)
+                    self.revealIfPending()
+                }
             }
     }
 
@@ -291,8 +297,8 @@ struct PlayerView: View {
 
     // MARK: Intro / credits skipping
 
-    /// Seconds of on-screen countdown before an automatic skip.
-    private static let skipLead: Double = 3
+    /// Seconds the skip button takes to fill before an automatic skip (Netflix-like).
+    private static let skipLead: Double = 5
 
     /// Runs every tick. Shows a countdown as playback reaches a detected intro (then jumps to its
     /// end) or the credits (then plays the next episode). The seek happens on the AVPlayer, so it
@@ -310,10 +316,10 @@ struct PlayerView: View {
                 if t >= fireAt {
                     skipIntro(to: intro.upperBound)
                 } else {
-                    setSkipPrompt(.init(kind: .intro, remaining: Int((fireAt - t).rounded(.up))))
+                    setSkipPrompt(.init(kind: .intro, progress: Self.countdown(fireAt: fireAt, now: t)))
                 }
             } else {
-                setSkipPrompt(t >= intro.lowerBound ? .init(kind: .intro, remaining: nil) : nil)
+                setSkipPrompt(t >= intro.lowerBound ? .init(kind: .intro, progress: nil) : nil)
             }
             return
         }
@@ -327,13 +333,12 @@ struct PlayerView: View {
                 let fireAt = creditsSkipAt ?? max(cs, t + lead)
                 creditsSkipAt = fireAt
                 if t >= fireAt {
-                    creditsDone = true
-                    handleEnd()
+                    skipCredits()
                 } else {
-                    setSkipPrompt(.init(kind: .credits, remaining: Int((fireAt - t).rounded(.up))))
+                    setSkipPrompt(.init(kind: .credits, progress: Self.countdown(fireAt: fireAt, now: t)))
                 }
             } else {
-                setSkipPrompt(t >= cs ? .init(kind: .credits, remaining: nil) : nil)
+                setSkipPrompt(t >= cs ? .init(kind: .credits, progress: nil) : nil)
             }
             return
         }
@@ -345,13 +350,68 @@ struct PlayerView: View {
         if overlay.skip != p { overlay.skip = p }
     }
 
+    /// How far a countdown firing at `fireAt` has run, 0…1 (the skip button's fill).
+    private static func countdown(fireAt: Double, now t: Double) -> Double {
+        min(1, max(0, 1 - (fireAt - t) / skipLead))
+    }
+
     private func skipIntro(to end: Double) {
         introDone = true
         introSkipAt = nil
         setSkipPrompt(nil)
-        player?.seek(to: CMTime(seconds: end, preferredTimescale: 600),
-                     toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600))
-        overlay.showToast(String(localized: "Skipped intro"))
+        cut { reveal in
+            player?.seek(to: CMTime(seconds: end, preferredTimescale: 600),
+                         toleranceBefore: .zero,
+                         toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { _ in
+                DispatchQueue.main.async { reveal() }
+            }
+        }
+    }
+
+    /// Credits reached (or "Next Episode" pressed): dip out, then go to the next episode. The
+    /// picture comes back when its item is ready (see `observeReady`).
+    private func skipCredits() {
+        creditsDone = true
+        setSkipPrompt(nil)
+        cut { reveal in
+            pendingReveal = reveal
+            handleEnd()
+            // Failsafe: never leave the picture black if the next episode doesn't load.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                revealIfPending()
+            }
+        }
+    }
+
+    /// A soft cut around a jump: picture and sound ease out (~0.35 s), `jump` runs, and calling
+    /// the `reveal` it's handed eases them back in (~0.6 s), so a skip never lands abruptly. The
+    /// fade is drawn on the Mac; an AirPlay TV just cuts.
+    private func cut(_ jump: @escaping (_ reveal: @escaping () -> Void) -> Void) {
+        guard let p = player else { return jump {} }
+        let volume = p.volume
+        rampVolume(p, to: 0, over: 0.35)
+        overlay.setBlackout(true, 0.35) {
+            jump {
+                overlay.setBlackout(false, 0.6, nil)
+                rampVolume(p, to: volume, over: 0.6)
+            }
+        }
+    }
+
+    private func revealIfPending() {
+        guard let reveal = pendingReveal else { return }
+        pendingReveal = nil
+        reveal()
+    }
+
+    private func rampVolume(_ p: AVPlayer, to target: Float, over seconds: Double) {
+        let start = p.volume, steps = 8
+        for i in 1...steps {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds * Double(i) / Double(steps)) {
+                p.volume = start + (target - start) * Float(i) / Float(steps)
+            }
+        }
     }
 
     /// "Skip Now" / "Play Now" / the manual Skip button.
@@ -361,8 +421,7 @@ struct PlayerView: View {
         case .intro:
             if let end = state.skips.markers(for: currentKey())?.intro?.upperBound { skipIntro(to: end) }
         case .credits:
-            creditsDone = true
-            handleEnd()
+            skipCredits()
         }
     }
 
@@ -538,6 +597,7 @@ struct PlayerView: View {
                 guard let q, let cdn = s.url(for: q),
                       let item = makeItem(cdnURLString: cdn, isLocal: false),
                       let p = player else {
+                    revealIfPending()
                     overlay.showToast(String(localized: "Couldn't load \(ref.tag)"))
                     return
                 }
@@ -551,6 +611,7 @@ struct PlayerView: View {
                 load(item, into: p, resumeAt: resumeAt)
                 overlay.showToast(String(localized: "Playing \(ref.tag)…"))
             } catch {
+                revealIfPending()
                 overlay.showToast(String(localized: "Couldn't load \(ref.tag)"))
             }
         }

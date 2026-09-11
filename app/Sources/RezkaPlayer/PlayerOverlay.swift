@@ -8,8 +8,9 @@ final class PlayerOverlayModel: ObservableObject {
     struct SkipPrompt: Equatable {
         enum Kind { case intro, credits }
         let kind: Kind
-        /// Seconds until the automatic skip, or nil for a manual button (auto-skip off).
-        let remaining: Int?
+        /// How far the automatic skip's countdown has run (0…1, drawn as the button filling
+        /// up), or nil for a plain button (auto-skip off).
+        let progress: Double?
     }
 
     @Published var isSeries = false
@@ -29,6 +30,12 @@ final class PlayerOverlayModel: ObservableObject {
     var onSkipNow: () -> Void = {}
     var onCancelSkip: () -> Void = {}
     var onToggleAutoSkip: (Bool) -> Void = { _ in }
+
+    /// Fade the picture to black (true) or back (false) over `duration`, then call `done`.
+    /// Installed by `PlayerOverlayHost`; a skip dips through black so it reads as a cut.
+    var setBlackout: (_ on: Bool, _ duration: TimeInterval, _ done: (() -> Void)?) -> Void = { _, _, done in
+        done?()
+    }
 
     private var hideControls: Task<Void, Never>?
     private var hideToast: Task<Void, Never>?
@@ -97,6 +104,19 @@ enum PlayerOverlayHost {
         root.onExit = { @MainActor [weak model] in model?.pointerExited() }
         container.addSubview(root)
 
+        // First subview, so it covers the video but sits under the controls.
+        let fade = FadeView(frame: root.bounds)
+        fade.autoresizingMask = [.width, .height]
+        root.addSubview(fade)
+        model.setBlackout = { [weak fade] on, duration, done in
+            guard let fade else { done?(); return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = duration
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                fade.animator().alphaValue = on ? 1 : 0
+            }, completionHandler: { done?() })
+        }
+
         func host<V: View>(_ view: V) -> NSView {
             let h = NSHostingView(rootView: view)
             h.sizingOptions = [.intrinsicContentSize]
@@ -143,6 +163,21 @@ final class PointerTrackingView: NSView {
     override func mouseMoved(with event: NSEvent) { onMove?(); super.mouseMoved(with: event) }
     override func mouseEntered(with event: NSEvent) { onMove?(); super.mouseEntered(with: event) }
     override func mouseExited(with event: NSEvent) { onExit?(); super.mouseExited(with: event) }
+}
+
+/// Black layer between the video and the controls, faded in and out around a skip. Never
+/// takes clicks.
+final class FadeView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        alphaValue = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Views
@@ -244,43 +279,75 @@ struct PlayerEpisodeBar: View {
     }
 }
 
-/// "Skipping intro in 3…" countdown (or a plain Skip button when auto-skip is off).
+/// Netflix-style "Skip Intro" / "Next Episode" button. While an automatic skip counts down it
+/// fills left to right; the ✕ beside it cancels (watch the intro / stay in the credits). With
+/// auto-skip off it's just the button.
 struct PlayerSkipPrompt: View {
     @ObservedObject var model: PlayerOverlayModel
 
     var body: some View {
         Group {
             if let p = model.skip {
-                HStack(spacing: 10) {
-                    if let r = p.remaining {
-                        Group {
-                            if p.kind == .intro { Text("Skipping intro in \(r)…") }
-                            else { Text("Next episode in \(r)…") }
+                HStack(spacing: 8) {
+                    SkipButton(title: p.kind == .intro ? "Skip Intro" : "Next Episode",
+                               icon: p.kind == .intro ? "forward.fill" : "forward.end.fill",
+                               progress: p.progress) { model.onSkipNow() }
+                    if p.progress != nil {
+                        Button { model.onCancelSkip() } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .frame(width: 28, height: 28)
+                                .background(.black.opacity(0.55), in: Circle())
+                                .overlay(Circle().strokeBorder(.white.opacity(0.5), lineWidth: 1))
+                                .contentShape(Circle())
                         }
-                        .font(.callout.weight(.semibold)).monospacedDigit()
-
-                        Button(p.kind == .intro ? "Skip Now" : "Play Now") { model.onSkipNow() }
-                            .buttonStyle(.borderedProminent)
-                        Button("Cancel") { model.onCancelSkip() }
-                            .buttonStyle(.bordered)
-                    } else {
-                        Button { model.onSkipNow() } label: {
-                            Label(p.kind == .intro ? "Skip Intro" : "Next Episode",
-                                  systemImage: "forward.fill")
-                                .font(.callout.weight(.semibold))
-                        }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.plain)
+                        .help(p.kind == .intro ? "Watch the intro" : "Keep watching")
                     }
                 }
-                .controlSize(.large)
-                .padding(.horizontal, 14).padding(.vertical, 10)
                 .foregroundStyle(.white)
-                .background(.black.opacity(0.72), in: Capsule())
-                .environment(\.colorScheme, .dark)
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .offset(x: 12)))
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: model.skip)
+        // Animate appearing/disappearing only — the fill animates itself between ticks.
+        .animation(.easeOut(duration: 0.3), value: model.skip?.kind)
+    }
+}
+
+/// White-outlined, dark-glass button that inverts on hover and, given `progress`, fills up.
+private struct SkipButton: View {
+    let title: LocalizedStringKey
+    let icon: String
+    let progress: Double?
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6)
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .padding(.horizontal, 20).padding(.vertical, 11)
+                .foregroundStyle(hovering ? Color.black : Color.white)
+                .background {
+                    GeometryReader { g in
+                        ZStack(alignment: .leading) {
+                            hovering ? Color.white : Color.black.opacity(0.55)
+                            if let progress, !hovering {
+                                Color.white.opacity(0.32)
+                                    .frame(width: g.size.width * min(1, max(0, progress)))
+                                    .animation(.linear(duration: 0.25), value: progress)
+                            }
+                        }
+                    }
+                }
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(.white.opacity(hovering ? 1 : 0.85), lineWidth: 1.5))
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
     }
 }
 

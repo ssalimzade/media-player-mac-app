@@ -1009,30 +1009,6 @@
         "uk" : { "stringUnit" : { "state" : "translated", "value" : "Серія %lld" } }
       }
     },
-    "Skipping intro in %lld…" : {
-      "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Пропуск заставки через %lld…" } },
-        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Пропуск заставки через %lld…" } }
-      }
-    },
-    "Next episode in %lld…" : {
-      "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Следующая серия через %lld…" } },
-        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Наступна серія через %lld…" } }
-      }
-    },
-    "Skip Now" : {
-      "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Пропустить" } },
-        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Пропустити" } }
-      }
-    },
-    "Play Now" : {
-      "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Смотреть сейчас" } },
-        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Дивитися зараз" } }
-      }
-    },
     "Skip Intro" : {
       "localizations" : {
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Пропустить заставку" } },
@@ -1063,12 +1039,6 @@
         "uk" : { "stringUnit" : { "state" : "translated", "value" : "Відтворення на цьому Mac" } }
       }
     },
-    "Skipped intro" : {
-      "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Заставка пропущена" } },
-        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Заставку пропущено" } }
-      }
-    },
     "Playing %@…" : {
       "localizations" : {
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Воспроизводится %@…" } },
@@ -1097,6 +1067,18 @@
       "localizations" : {
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Автоматически пропускать заставки и титры" } },
         "uk" : { "stringUnit" : { "state" : "translated", "value" : "Автоматично пропускати заставки й титри" } }
+      }
+    },
+    "Watch the intro" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Смотреть заставку" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Дивитися заставку" } }
+      }
+    },
+    "Keep watching" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Продолжить просмотр" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Продовжити перегляд" } }
       }
     }
   },
