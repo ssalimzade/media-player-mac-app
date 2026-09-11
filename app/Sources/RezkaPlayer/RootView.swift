@@ -68,8 +68,21 @@ struct PlayerTarget: Hashable {
     /// episode. Nil for streams, which use `episodeList` instead.
     var downloadID: UUID? = nil
 
+    /// Series display name (without the SxEy suffix), so the player can retitle as it advances.
+    var seriesName: String? = nil
+    /// Every episode of the series in watch order (streams only), so previous/next and the
+    /// player's episode list can cross season boundaries. Nil falls back to `episodeList`.
+    var allEpisodes: [EpisodeRef]? = nil
+
     /// Whether this target is a series (true when a season/episode is set).
     var isSeries: Bool { season != nil || episode != nil }
+}
+
+/// A (season, episode) pair in a series' watch order.
+struct EpisodeRef: Hashable {
+    let season: Int
+    let episode: Int
+    var tag: String { "S\(season)E\(episode)" }
 }
 
 struct RootView: View {

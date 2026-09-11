@@ -80,59 +80,57 @@ struct DetailView: View {
         .task { await loadInfo() }
     }
 
-    // MARK: Header + body
+    // MARK: Layout — what it is, then pick & play, then related titles
 
     @ViewBuilder private func content(_ info: TitleInfo) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 24) {
             header(info)
-
+            watchPanel(info)
             if let similar = info.similar, !similar.isEmpty {
-                Divider()
                 similarSection(similar)
             }
-
-            Divider()
-            playbackSection(info)
         }
         .padding(24)
     }
 
-    /// Cinematic header: blurred backdrop, poster, metadata, and an above-the-fold Play CTA.
+    /// Cinematic header: blurred backdrop, poster, and what the title is.
     @ViewBuilder private func header(_ info: TitleInfo) -> some View {
         HStack(alignment: .top, spacing: 20) {
             PosterImage(urlString: info.thumbnail ?? item.image)
-                .frame(width: 220, height: 320)
+                .frame(width: 180, height: 262)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
                 .shadow(color: .black.opacity(0.4), radius: 12, y: 6)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text(info.name).font(.title).bold()
+                Text(info.name).font(.largeTitle).bold()
+                    .fixedSize(horizontal: false, vertical: true)
                 if let orig = info.origName, orig != info.name {
                     Text(orig).font(.title3).foregroundStyle(.secondary)
                 }
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     if let y = info.releaseYear { Badge(text: String(y), system: "calendar") }
                     if let r = info.rating { Badge(text: String(format: "%.2f", r.value), system: "star.fill") }
                     if let c = info.category?.name { Badge(text: c.capitalized, system: "tag") }
-                    Badge(text: info.isSeries ? "Series" : "Movie",
+                    Badge(text: info.isSeries ? String(localized: "Series") : String(localized: "Movie"),
                           system: info.isSeries ? "tv" : "film")
+                    if let n = seasonCount(info), n > 0 {
+                        Badge(text: String(localized: "\(n) seasons"), system: "square.stack")
+                    }
                 }
-
-                headerPlayButton(info).padding(.top, 4)
 
                 if let desc = info.description, !desc.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(desc).font(.body).foregroundStyle(.secondary)
-                            .lineLimit(descExpanded ? nil : 3)
+                            .lineLimit(descExpanded ? nil : 4)
                             .fixedSize(horizontal: false, vertical: true)
-                        if desc.count > 180 {
+                        if desc.count > 240 {
                             Button(descExpanded ? "Show less" : "Show more") {
                                 withAnimation(.easeInOut(duration: 0.2)) { descExpanded.toggle() }
                             }
                             .buttonStyle(.link).font(.caption)
                         }
                     }
-                    .padding(.top, 2)
+                    .padding(.top, 4)
                 }
                 Spacer(minLength: 0)
             }
@@ -158,58 +156,238 @@ struct DetailView: View {
         .background(Color(nsColor: .quaternarySystemFill))
     }
 
-    /// The primary above-the-fold action: Play / Continue once the stream resolves,
-    /// a preparing state while it loads, or a retry on error.
-    @ViewBuilder private func headerPlayButton(_ info: TitleInfo) -> some View {
-        if let stream, let target = playerTarget(stream) {
-            let resuming = resumePosition > 5
-            let seTag = seasonEpisodeTag.map { " · \($0)" } ?? ""
-            NavigationLink(value: target) {
-                Label(resuming ? "Continue\(seTag)" : (info.isSeries ? "Play\(seTag)" : "Play"),
-                      systemImage: "play.fill")
-                    .font(.headline).frame(minWidth: 150).padding(.vertical, 4)
-            }
-            .buttonStyle(.borderedProminent).controlSize(.large)
-        } else if streamLoading {
-            Button {} label: {
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Preparing…") }
-                    .frame(minWidth: 150).padding(.vertical, 4)
-            }
-            .buttonStyle(.borderedProminent).controlSize(.large).disabled(true)
-        } else if streamError != nil {
-            Button { Task { await refetch() } } label: {
-                Label("Retry", systemImage: "arrow.clockwise")
-                    .frame(minWidth: 150).padding(.vertical, 4)
-            }
-            .buttonStyle(.bordered).controlSize(.large)
-        }
-    }
-
     /// Skeleton shown while the title's metadata loads.
     private var detailSkeleton: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 24) {
             HStack(alignment: .top, spacing: 20) {
-                SkeletonBox(cornerRadius: Theme.cardRadius).frame(width: 220, height: 320)
+                SkeletonBox(cornerRadius: Theme.cardRadius).frame(width: 180, height: 262)
                 VStack(alignment: .leading, spacing: 12) {
-                    SkeletonBox(cornerRadius: 6).frame(width: 260, height: 26)
+                    SkeletonBox(cornerRadius: 6).frame(width: 300, height: 30)
                     SkeletonBox(cornerRadius: 6).frame(width: 160, height: 16)
                     SkeletonBox(cornerRadius: 6).frame(width: 320, height: 14)
-                    SkeletonBox(cornerRadius: 8).frame(width: 150, height: 34).padding(.top, 6)
-                    SkeletonBox(cornerRadius: 6).frame(height: 60).frame(maxWidth: .infinity)
+                    SkeletonBox(cornerRadius: 6).frame(height: 70).frame(maxWidth: .infinity)
                     Spacer()
                 }
                 Spacer()
             }
-            .frame(height: 320)
+            .frame(height: 262)
+            SkeletonBox(cornerRadius: Theme.cardRadius).frame(height: 180).frame(maxWidth: .infinity)
         }
         .padding(24)
+    }
+
+    // MARK: Watch panel (season → episode → translation/quality → Play)
+
+    @ViewBuilder private func watchPanel(_ info: TitleInfo) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if info.isSeries {
+                seasonTabs(info)
+                episodeGrid(info)
+                Divider()
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                translatorRow(info)
+                if let stream, !stream.videos.isEmpty { qualityRow(stream) }
+            }
+
+            actionRow(info)
+
+            if seasonDownloading {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Queuing season… \(seasonDone)/\(seasonTotal)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let stream, !stream.subtitles.isEmpty {
+                Label("Subtitles: \(stream.subtitles.map(\.title).joined(separator: ", "))",
+                      systemImage: "captions.bubble")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .quaternarySystemFill).opacity(0.6),
+                    in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+    }
+
+    @ViewBuilder private func seasonTabs(_ info: TitleInfo) -> some View {
+        let seasons = info.episodes ?? []
+        let current = currentSeason(info)
+        if seasons.count > 1 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(seasons) { s in
+                        let selected = s.season == current?.season
+                        Button { selectSeason(s) } label: {
+                            Text(s.season_text)
+                                .font(.callout.weight(selected ? .semibold : .regular))
+                                .padding(.horizontal, 14).padding(.vertical, 6)
+                                .background(selected ? Theme.accent : Color(nsColor: .quaternarySystemFill),
+                                            in: Capsule())
+                                .foregroundStyle(selected ? Color.white : Color.primary)
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        } else if let only = seasons.first {
+            Text(only.season_text).font(.headline)
+        }
+    }
+
+    @ViewBuilder private func episodeGrid(_ info: TitleInfo) -> some View {
+        if let season = currentSeason(info) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 56, maximum: 72), spacing: 8)],
+                      alignment: .leading, spacing: 8) {
+                ForEach(season.episodes) { ep in
+                    let status = episodeStatus(season: season.season, episode: ep.episode)
+                    Button { selectEpisode(ep.episode) } label: {
+                        EpisodeChip(number: ep.episode, selected: ep.episode == episodeID, status: status)
+                    }
+                    .buttonStyle(.plain)
+                    .help(ep.episode_text)
+                    .contextMenu {
+                        if case .watched = status {
+                            Button("Mark as Unwatched") {
+                                state.progress.remove(id: ProgressStore.key(
+                                    pageURL: item.url, season: season.season, episode: ep.episode))
+                            }
+                        } else {
+                            Button("Mark as Watched") {
+                                markEpisodeWatched(info, season: season.season, episode: ep.episode)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func translatorRow(_ info: TitleInfo) -> some View {
+        let translators = availableTranslators(info)
+        if !translators.isEmpty {
+            GridRow {
+                Text("Translation").foregroundStyle(.secondary)
+                Picker("Translation", selection: Binding(
+                    get: { translatorID ?? translators.first?.id },
+                    set: { newValue in
+                        translatorID = newValue
+                        if let tid = newValue { state.prefs.setTranslator(tid, for: item.url) }
+                        Task { await refetch() }
+                    })
+                ) {
+                    ForEach(translators) { t in
+                        Text(t.premium ? "\(t.displayName) ★" : t.displayName).tag(Optional(t.id))
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 320, alignment: .leading)
+            }
+        }
+    }
+
+    @ViewBuilder private func qualityRow(_ stream: StreamResponse) -> some View {
+        GridRow {
+            Text("Quality").foregroundStyle(.secondary)
+            Picker("Quality", selection: Binding(
+                get: { quality ?? stream.sortedQualities.last ?? "" },
+                set: { quality = $0; state.preferredQuality = $0 })
+            ) {
+                ForEach(stream.sortedQualities, id: \.self) { q in Text(q).tag(q) }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .fixedSize()
+        }
+    }
+
+    /// The one primary action (Play / Continue, labelled with where it resumes), plus downloads.
+    @ViewBuilder private func actionRow(_ info: TitleInfo) -> some View {
+        HStack(spacing: 12) {
+            if let stream, let target = playerTarget(stream) {
+                NavigationLink(value: target) {
+                    playLabel.font(.headline).frame(minWidth: 170).padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent).controlSize(.large)
+
+                downloadControl(stream, info: info)
+
+                if let q = currentQuality(stream), let n = stream.videos[q]?.count, n > 1 {
+                    Text("\(n) mirrors").font(.caption).foregroundStyle(.secondary)
+                }
+            } else if streamLoading {
+                Button {} label: {
+                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Preparing…") }
+                        .frame(minWidth: 170).padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent).controlSize(.large).disabled(true)
+            } else if let streamError {
+                Button { Task { await refetch() } } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .frame(minWidth: 120).padding(.vertical, 4)
+                }
+                .buttonStyle(.bordered).controlSize(.large)
+                Label(streamError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange).font(.callout)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder private var playLabel: some View {
+        let resumeAt = resumePosition
+        if resumeAt > 5 {
+            let at = Self.clock(resumeAt)
+            if let tag = seasonEpisodeTag {
+                Label("Continue \(tag) · \(at)", systemImage: "play.fill")
+            } else {
+                Label("Continue from \(at)", systemImage: "play.fill")
+            }
+        } else if let tag = seasonEpisodeTag {
+            Label("Play \(tag)", systemImage: "play.fill")
+        } else {
+            Label("Play", systemImage: "play.fill")
+        }
+    }
+
+    @ViewBuilder private func downloadControl(_ stream: StreamResponse, info: TitleInfo) -> some View {
+        let have = currentQuality(stream).map {
+            state.downloads.isDownloaded(pageURL: item.url, quality: $0, seasonEpisode: seasonEpisodeTag)
+        } ?? false
+        if info.isSeries {
+            Menu {
+                Button(have ? "Episode Already Downloaded" : "Download Episode") {
+                    download(stream, info: info)
+                }
+                .disabled(have)
+                Button("Download Whole Season") {
+                    Task { await downloadSeason(info, like: stream) }
+                }
+                .disabled(seasonDownloading)
+            } label: {
+                Label("Download", systemImage: have ? "checkmark.circle" : "arrow.down.circle")
+            }
+            .fixedSize()
+            .controlSize(.large)
+        } else {
+            Button { download(stream, info: info) } label: {
+                Label(have ? "Downloaded" : "Download",
+                      systemImage: have ? "checkmark.circle" : "arrow.down.circle")
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(.bordered).controlSize(.large)
+            .disabled(have)
+        }
     }
 
     // MARK: Similar titles
 
     @ViewBuilder private func similarSection(_ items: [CatalogueItem]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Similar").font(.headline)
+            Text("Similar").font(.title3).bold()
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 16) {
                     ForEach(items) { sim in
@@ -224,123 +402,25 @@ struct DetailView: View {
         }
     }
 
-    // MARK: Playback controls
-
-    @ViewBuilder private func playbackSection(_ info: TitleInfo) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if info.isSeries { seasonEpisodePickers(info) }
-            translatorPicker(info)
-
-            if streamLoading {
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Fetching stream…") }
-                    .foregroundStyle(.secondary)
-            } else if let streamError {
-                Label(streamError, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange).font(.callout)
-            } else if let stream, !stream.videos.isEmpty {
-                resolutionControls(stream, info: info)
-            }
-        }
-    }
-
-    @ViewBuilder private func seasonEpisodePickers(_ info: TitleInfo) -> some View {
-        let seasons = info.episodes ?? []
-        HStack(spacing: 16) {
-            Picker("Season", selection: Binding(
-                get: { seasonID ?? seasons.first?.season ?? 1 },
-                set: { seasonID = $0; episodeID = nil; Task { await refetch() } })
-            ) {
-                ForEach(seasons) { s in Text(s.season_text).tag(s.season) }
-            }.fixedSize()
-
-            let eps = seasons.first { $0.season == (seasonID ?? seasons.first?.season) }?.episodes ?? []
-            Picker("Episode", selection: Binding(
-                get: { episodeID ?? eps.first?.episode ?? 1 },
-                set: { episodeID = $0; Task { await refetch() } })
-            ) {
-                ForEach(eps) { e in Text(e.episode_text).tag(e.episode) }
-            }.fixedSize()
-        }
-    }
-
-    @ViewBuilder private func translatorPicker(_ info: TitleInfo) -> some View {
-        let translators = availableTranslators(info)
-        if !translators.isEmpty {
-            Picker("Translation", selection: Binding(
-                get: { translatorID ?? translators.first?.id },
-                set: { newValue in
-                    translatorID = newValue
-                    if let tid = newValue { state.prefs.setTranslator(tid, for: item.url) }
-                    Task { await refetch() }
-                })
-            ) {
-                ForEach(translators) { t in
-                    Text(t.premium ? "\(t.displayName) ★" : t.displayName).tag(Optional(t.id))
-                }
-            }
-            .frame(maxWidth: 360)
-        }
-    }
-
-    @ViewBuilder private func resolutionControls(_ stream: StreamResponse, info: TitleInfo) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("Resolution", selection: Binding(
-                get: { quality ?? stream.sortedQualities.last ?? "" },
-                set: { quality = $0; state.preferredQuality = $0 })
-            ) {
-                ForEach(stream.sortedQualities, id: \.self) { q in Text(q).tag(q) }
-            }
-            .pickerStyle(.segmented)
-            .fixedSize()
-
-            HStack(spacing: 12) {
-                if let target = playerTarget(stream) {
-                    let resuming = resumePosition > 5
-                    NavigationLink(value: target) {
-                        Label(resuming ? "Resume" : "Play",
-                              systemImage: resuming ? "play.circle" : "play.fill").frame(width: 120)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                Button {
-                    download(stream, info: info)
-                } label: {
-                    Label(info.isSeries ? "Download Episode" : "Download",
-                          systemImage: "arrow.down.circle").frame(width: 150)
-                }
-                .buttonStyle(.bordered)
-
-                if info.isSeries {
-                    Button {
-                        Task { await downloadSeason(info, like: stream) }
-                    } label: {
-                        Label("Download Season", systemImage: "square.and.arrow.down.on.square")
-                            .frame(width: 160)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(seasonDownloading)
-                }
-
-                if let q = quality ?? stream.sortedQualities.last,
-                   let n = stream.videos[q]?.count, n > 1 {
-                    Text("\(n) mirrors").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if seasonDownloading {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Queuing season… \(seasonDone)/\(seasonTotal)")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if !stream.subtitles.isEmpty {
-                Text("Subtitles available: \(stream.subtitles.map(\.title).joined(separator: ", "))")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
     // MARK: Derived
+
+    private func seasonCount(_ info: TitleInfo) -> Int? {
+        guard info.isSeries, let n = info.episodes?.count, n > 1 else { return nil }
+        return n
+    }
+
+    private func currentSeason(_ info: TitleInfo) -> SeasonInfo? {
+        let seasons = info.episodes ?? []
+        return seasons.first { $0.season == seasonID } ?? seasons.first
+    }
+
+    private func episodeStatus(season: Int, episode: Int) -> EpisodeChip.Status {
+        let key = ProgressStore.key(pageURL: item.url, season: season, episode: episode)
+        guard let e = state.progress.entry(id: key) else { return .new }
+        if e.isComplete { return .watched }
+        if e.duration > 0, e.position > 30 { return .inProgress(e.position / e.duration) }
+        return .new
+    }
 
     private func availableTranslators(_ info: TitleInfo) -> [Translator] {
         guard info.isSeries else { return info.translators }
@@ -378,7 +458,9 @@ struct DetailView: View {
             translatorId: translatorID, quality: q,
             episodeList: epList, posterURL: info?.thumbnail ?? item.image,
             resumeAt: resume,
-            originalTitle: info?.origName, year: info?.releaseYear)
+            originalTitle: info?.origName, year: info?.releaseYear,
+            seriesName: isSeries ? info?.name : nil,
+            allEpisodes: isSeries ? allEpisodeRefs() : nil)
     }
 
     /// Episode numbers of the currently selected season (for autoplay), or nil for movies.
@@ -386,6 +468,13 @@ struct DetailView: View {
         guard info?.isSeries == true, let seasons = info?.episodes else { return nil }
         let sid = seasonID ?? seasons.first?.season
         return seasons.first { $0.season == sid }?.episodes.map { $0.episode }
+    }
+
+    /// Every episode of the series in watch order, so the player can cross season boundaries.
+    private func allEpisodeRefs() -> [EpisodeRef] {
+        (info?.episodes ?? []).flatMap { s in
+            s.episodes.map { EpisodeRef(season: s.season, episode: $0.episode) }
+        }
     }
 
     /// Resume position (>5s, unfinished) for the current selection, used to label the Play button.
@@ -427,7 +516,39 @@ struct DetailView: View {
         return "S\(s)E\(e)"
     }
 
+    /// "1:02:03" / "12:40".
+    static func clock(_ seconds: Double) -> String {
+        let t = Int(seconds.rounded(.down))
+        let h = t / 3600, m = (t % 3600) / 60, s = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+
     // MARK: Actions
+
+    private func selectSeason(_ s: SeasonInfo) {
+        guard s.season != seasonID else { return }
+        seasonID = s.season
+        // Land on the first episode of that season you haven't finished.
+        episodeID = s.episodes.first {
+            if case .watched = episodeStatus(season: s.season, episode: $0.episode) { return false }
+            return true
+        }?.episode ?? s.episodes.first?.episode
+        Task { await refetch() }
+    }
+
+    private func selectEpisode(_ e: Int) {
+        guard e != episodeID else { return }
+        episodeID = e
+        Task { await refetch() }
+    }
+
+    private func markEpisodeWatched(_ info: TitleInfo, season: Int, episode: Int) {
+        state.progress.record(
+            id: ProgressStore.key(pageURL: item.url, season: season, episode: episode),
+            title: "\(info.name) · S\(season)E\(episode)", pageURL: item.url,
+            posterURL: info.thumbnail ?? item.image, season: season, episode: episode,
+            translatorId: nil, quality: nil, position: 0, duration: 0, finished: true)
+    }
 
     private func loadInfo() async {
         guard case .ready = state.sidecar.state else {
@@ -554,6 +675,43 @@ struct DetailView: View {
                 continue   // skip episodes that fail to resolve
             }
         }
+    }
+}
+
+/// One episode in the title page's grid: its number, a ✓ once watched, and a thin resume bar
+/// while in progress.
+struct EpisodeChip: View {
+    enum Status { case new, inProgress(Double), watched }
+
+    let number: Int
+    let selected: Bool
+    let status: Status
+
+    var body: some View {
+        let watched: Bool = { if case .watched = status { return true } else { return false } }()
+        HStack(spacing: 3) {
+            Text(verbatim: "\(number)")
+                .font(.callout.monospacedDigit().weight(selected ? .bold : .medium))
+            if watched { Image(systemName: "checkmark").font(.caption2.bold()) }
+        }
+        .frame(maxWidth: .infinity, minHeight: 34)
+        .foregroundStyle(selected ? Color.white : (watched ? Color.secondary : Color.primary))
+        .background(selected ? Theme.accent : Color(nsColor: .quaternarySystemFill),
+                    in: RoundedRectangle(cornerRadius: Theme.tileRadius))
+        .overlay(alignment: .bottom) {
+            if case .inProgress(let f) = status {
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.18))
+                        Capsule().fill(selected ? Color.white : Theme.accent)
+                            .frame(width: max(3, g.size.width * min(1, max(0, f))))
+                    }
+                }
+                .frame(height: 3)
+                .padding(.horizontal, 7).padding(.bottom, 4)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: Theme.tileRadius))
     }
 }
 

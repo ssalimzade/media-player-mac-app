@@ -29,7 +29,9 @@ final class ProgressStore: ObservableObject {
 
     @Published private(set) var items: [Entry] = []
     private let fm = FileManager.default
-    private let cap = 50
+    /// One entry per episode, so this must hold whole series' watch history (the title page's
+    /// episode ✓ marks read from it) — entries are tiny.
+    private let cap = 2000
 
     init() { load() }
 
