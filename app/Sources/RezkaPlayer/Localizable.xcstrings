@@ -894,6 +894,210 @@
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Файлы cookie вашей сессии хранятся в Связке ключей macOS и отправляются только на HDRezka." } },
         "uk" : { "stringUnit" : { "state" : "translated", "value" : "Файли cookie вашої сесії зберігаються у Зв’язці ключів macOS і надсилаються лише на HDRezka." } }
       }
+    },
+    "%lld seasons" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Сезонов: %lld" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Сезонів: %lld" } }
+      }
+    },
+    "Subtitles: %@" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Субтитры: %@" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Субтитри: %@" } }
+      }
+    },
+    "Quality" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Качество" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Якість" } }
+      }
+    },
+    "Mark as Unwatched" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Отметить как непросмотренное" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Позначити як непереглянуте" } }
+      }
+    },
+    "Mark as Watched" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Отметить как просмотренное" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Позначити як переглянуте" } }
+      }
+    },
+    "Continue %@ · %@" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Продолжить %@ · %@" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Продовжити %@ · %@" } }
+      }
+    },
+    "Continue from %@" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Продолжить с %@" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Продовжити з %@" } }
+      }
+    },
+    "Play %@" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Смотреть %@" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Дивитися %@" } }
+      }
+    },
+    "Episode Already Downloaded" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Серия уже скачана" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Серію вже завантажено" } }
+      }
+    },
+    "Download Whole Season" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Скачать весь сезон" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Завантажити весь сезон" } }
+      }
+    },
+    "Downloaded" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Скачано" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Завантажено" } }
+      }
+    },
+    "Previous episode (⇧⌘←)" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Предыдущая серия (⇧⌘←)" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Попередня серія (⇧⌘←)" } }
+      }
+    },
+    "Next episode (⇧⌘→)" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Следующая серия (⇧⌘→)" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Наступна серія (⇧⌘→)" } }
+      }
+    },
+    "All episodes" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Все серии" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Усі серії" } }
+      }
+    },
+    "Auto-skip" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Автопропуск" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Автопропуск" } }
+      }
+    },
+    "Skipping intros and credits automatically — click to turn off" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Заставки и титры пропускаются автоматически — нажмите, чтобы выключить" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Заставки й титри пропускаються автоматично — натисніть, щоб вимкнути" } }
+      }
+    },
+    "Auto-skip is off — click to skip intros and credits automatically" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Автопропуск выключен — нажмите, чтобы пропускать заставки и титры" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Автопропуск вимкнено — натисніть, щоб пропускати заставки й титри" } }
+      }
+    },
+    "Season %lld" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Сезон %lld" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Сезон %lld" } }
+      }
+    },
+    "Episode %lld" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Серия %lld" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Серія %lld" } }
+      }
+    },
+    "Skipping intro in %lld…" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Пропуск заставки через %lld…" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Пропуск заставки через %lld…" } }
+      }
+    },
+    "Next episode in %lld…" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Следующая серия через %lld…" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Наступна серія через %lld…" } }
+      }
+    },
+    "Skip Now" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Пропустить" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Пропустити" } }
+      }
+    },
+    "Play Now" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Смотреть сейчас" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Дивитися зараз" } }
+      }
+    },
+    "Skip Intro" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Пропустить заставку" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Пропустити заставку" } }
+      }
+    },
+    "Next Episode" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Следующая серия" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Наступна серія" } }
+      }
+    },
+    "Play the next episode" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Включить следующую серию" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Увімкнути наступну серію" } }
+      }
+    },
+    "AirPlay — playing on TV" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "AirPlay — воспроизведение на ТВ" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "AirPlay — відтворення на ТБ" } }
+      }
+    },
+    "Playing on this Mac" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Воспроизведение на этом Mac" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Відтворення на цьому Mac" } }
+      }
+    },
+    "Skipped intro" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Заставка пропущена" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Заставку пропущено" } }
+      }
+    },
+    "Playing %@…" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Воспроизводится %@…" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Відтворюється %@…" } }
+      }
+    },
+    "Loading %@…" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Загрузка %@…" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Завантаження %@…" } }
+      }
+    },
+    "Couldn't load %@" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Не удалось загрузить %@" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Не вдалося завантажити %@" } }
+      }
+    },
+    "Playback" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Воспроизведение" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Відтворення" } }
+      }
+    },
+    "Skip intros and credits automatically" : {
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Автоматически пропускать заставки и титры" } },
+        "uk" : { "stringUnit" : { "state" : "translated", "value" : "Автоматично пропускати заставки й титри" } }
+      }
     }
   },
   "version" : "1.0"
