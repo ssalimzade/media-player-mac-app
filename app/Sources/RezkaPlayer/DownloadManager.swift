@@ -84,30 +84,19 @@ final class DownloadManager: NSObject, ObservableObject {
         items.first { $0.id == id }
     }
 
-    /// The next *downloaded* episode of the same series after `item`: the nearest higher episode in
-    /// the same season, else the first episode of the nearest later season. Only completed
-    /// downloads qualify — "next episode" has to be watchable offline to be worth offering.
-    func nextDownloadedEpisode(after item: DownloadItem) -> DownloadItem? {
-        guard let cur = item.seasonEpisodeNumbers else { return nil }
-        let siblings = items.filter {
-            $0.state == .completed && $0.pageURL == item.pageURL && $0.seasonEpisodeNumbers != nil
-        }
-        // Same season, next episode up.
-        let sameSeason = siblings
-            .compactMap { s -> (DownloadItem, Int)? in
-                guard let n = s.seasonEpisodeNumbers, n.season == cur.season,
-                      n.episode > cur.episode else { return nil }
-                return (s, n.episode)
+    /// A series' *downloaded* episodes in watch order — season, then episode, compared
+    /// numerically (so S1E9 comes before S1E10) — one per episode. Only completed downloads
+    /// qualify: previous/next in the player has to be watchable offline to be worth offering.
+    func downloadedEpisodes(ofPage pageURL: String) -> [DownloadItem] {
+        var seen = Set<String>()
+        return items
+            .compactMap { item -> (DownloadItem, Int, Int)? in
+                guard item.state == .completed, item.pageURL == pageURL,
+                      let n = item.seasonEpisodeNumbers else { return nil }
+                return (item, n.season, n.episode)
             }
-            .min { $0.1 < $1.1 }
-        if let next = sameSeason?.0 { return next }
-        // Otherwise roll over to the earliest episode of the next season we have.
-        return siblings
-            .compactMap { s -> (DownloadItem, Int, Int)? in
-                guard let n = s.seasonEpisodeNumbers, n.season > cur.season else { return nil }
-                return (s, n.season, n.episode)
-            }
-            .min { ($0.1, $0.2) < ($1.1, $1.2) }?.0
+            .sorted { ($0.1, $0.2) < ($1.1, $1.2) }
+            .compactMap { seen.insert("\($0.1)x\($0.2)").inserted ? $0.0 : nil }
     }
 
     func localURL(for item: DownloadItem) -> URL {

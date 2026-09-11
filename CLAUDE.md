@@ -58,11 +58,17 @@ Packaged DMG: `./scripts/package.sh` → `build/RezkaPlayer.dmg` (see Packaging 
   PATCH`-marked edits (documented in `sidecar/hdrezka/VENDORED.md` — currently: movie CDN flags, the
   `favs` token, and a richer `FetchFailed`). Our own features go in `sidecar/browse.py` /
   `server.py`, never inside `hdrezka/`.
-- **Next episode:** `PlayerView.advanceToNextEpisode(auto:)` serves both the toolbar button and
-  end-of-playback auto-advance, for streams (walk `target.episodeList`) *and* downloads
-  (`DownloadManager.nextDownloadedEpisode(after:)` — next completed episode in the season, else the
-  first of a later season). The button lives in the **window toolbar**, not overlaid on the video:
-  AVKit owns the video's corners (volume/PiP/full-screen) and an overlay collides with them.
+- **Episode navigation:** `PlayerView.jump(to:)` serves previous/next, the episode list, the
+  credits countdown and end-of-playback auto-advance (resuming part-watched episodes). Streams walk
+  the whole series across seasons (`PlayerTarget.allEpisodes`, built by `DetailView`); local
+  playback walks completed downloads (`DownloadManager.downloadedEpisodes(ofPage:)`, numeric
+  season/episode order). A Next button also sits in the window toolbar.
+- **On-video controls live in `AVPlayerView.contentOverlayView`** (`PlayerOverlay.swift`), not a
+  SwiftUI overlay: AVKit moves the whole player view — content overlay included — into its own
+  full-screen window, so a SwiftUI overlay would be left behind. Each control is a content-sized
+  `NSHostingView` on a click-transparent `PointerTrackingView` (reveals the bar on pointer
+  movement), so the rest of the video stays AVKit's to click. The top-centre bar keeps clear of
+  AVKit's corners (volume/PiP/full-screen); the skip countdown sits bottom-right above its control bar.
 - **Local playback carries page context.** A local `PlayerTarget` sets `pageURL`, `season`/`episode`
   and `downloadID`, not just the file path. Progress is keyed on the page URL, so without it
   Continue Watching stored a *media file path* as the page URL and then 404'd trying to load the
@@ -82,10 +88,11 @@ Persist JSON to `~/Library/Application Support/RezkaPlayer/` (login cookies go t
 | `WatchedStore` | `watched.json` | watched/History |
 | `ProgressStore` | `progress.json` | resume positions / Continue Watching |
 | `PreferenceStore` | `lasttranslator.json` | per-title last translator |
+| `SkipStore` | `skipmarkers.json` (+ `Fingerprints/` cache) | detected intro/credits per episode |
 | `Keychain.swift` | macOS Keychain | HDRezka session cookies |
 
 `AppState` re-publishes each store's `objectWillChange` (sinks in `init()`), holds `@AppStorage`
-prefs (`hdrezkaOrigin`, `proxyURL`, `preferredQuality`, `hideWatched`, `hdrezkaEmail`), and exposes
+prefs (`hdrezkaOrigin`, `proxyURL`, `preferredQuality`, `hideWatched`, `autoSkipIntroCredits`, `hdrezkaEmail`), and exposes
 `login/logout`, `pushProxyConfig`, and `playbackURLString(for:)` (relay rewriting). Sidebar sections
 are an enum in `RootView.swift` (`sectionRoot` switch). The menu bar + notification auth live in
 `RezkaPlayerApp.swift` / `DownloadManager.swift`.
@@ -146,6 +153,30 @@ AirPlay screen while the Mac reports "playing on TV":
 Verified against a Samsung Tizen receiver, which fetches the URL with a `SMART-TV; LINUX; Tizen`
 user-agent. Note this is *AirPlay*, not screen mirroring — mirroring never flips
 `isExternalPlaybackActive`, so none of the above applies to it.
+
+### Intro / credits skipping
+
+HDRezka publishes no intro/credits markers, so `SkipDetector` (an `actor`) finds them the way
+Plex/Jellyfin do: the opening theme is the same recording in every episode, so the longest stretch
+of audio two neighbouring episodes share in their first quarter (≤7 min) is the intro, and in their
+last fifth (≤4 min) the credits. Fingerprints are a Philips/Haitsma–Kalker sub-band hash built with
+Accelerate (~8 frames/s, 32 bits each); matching is XOR+popcount over every time offset, a run
+tolerating ~1.5 s gaps (voice-over across the theme). No ffmpeg/chromaprint to bundle.
+
+- **`AVAssetReader` refuses non-local URLs** (`-11838`). For streams, `Media.sparse` fetches the
+  moov (head, else tail) into a same-size **sparse** temp file, then uses the sample table
+  (`AVSampleCursor.currentChunkStorageRange`) to Range-fetch only the bytes holding each analysed
+  window. Audio comes from the **lowest** quality (`AppState.skipAnalysisURL`, relay-routed when
+  proxied). Downloads are read in place.
+- The player calls `prepare(current:neighbours:)` on every episode change: the current episode is
+  paired with its next (else previous) neighbour, then the *next* episode is pre-analysed so
+  auto-advance has markers ready. One pair comparison yields markers for both episodes.
+  Fingerprints cache per episode + translation in `Fingerprints/`; "checked, nothing found" is
+  stored too so it isn't redone (network failures aren't).
+- `PlayerView.checkSkips` (0.25 s ticks) shows a 3 s countdown in media time (pausing pauses it),
+  then seeks past the intro or, for credits, runs the end-of-episode path (mark finished → next).
+  Cancel leaves that episode alone. The seek is on the `AVPlayer`, so it works over AirPlay — but the
+  countdown is drawn on the Mac only. `autoSkipIntroCredits` off = no detection/fetching at all.
 
 ## Anubis anti-bot gateway
 

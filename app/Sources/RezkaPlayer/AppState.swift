@@ -25,6 +25,13 @@ final class AppState: ObservableObject {
         didSet { objectWillChange.send() }
     }
 
+    /// Detect intros/credits in series and skip them (with a short on-screen countdown): the
+    /// intro jumps ahead, the credits go straight to the next episode. Off = no detection at all,
+    /// so no extra audio is fetched.
+    @AppStorage("autoSkipIntroCredits") var autoSkip: Bool = true {
+        didSet { objectWillChange.send() }
+    }
+
     /// Maximum on-disk size for downloads, in GB. `0` means unlimited. When exceeded,
     /// the oldest completed downloads are auto-deleted after a download finishes.
     @AppStorage("maxStorageGB") var maxStorageGB: Double = 0 {
@@ -100,6 +107,13 @@ final class AppState: ObservableObject {
     let progress = ProgressStore()
     let watched = WatchedStore()
     let prefs = PreferenceStore()
+    let skips = SkipStore()
+    /// Finds intros/credits by comparing neighbouring episodes' audio (see SkipDetector).
+    lazy var skipDetector = SkipDetector(store: skips) { [weak self] page, season, episode, translator in
+        guard let self else { throw CancellationError() }
+        return try await self.skipAnalysisURL(pageURL: page, season: season, episode: episode,
+                                              translator: translator)
+    }
     lazy var api = APIClient(sidecar: sidecar) { [weak self] in
         self?.origin ?? "https://hdrezka.ag"
     } cookiesProvider: { [weak self] in
@@ -146,6 +160,9 @@ final class AppState: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
         watched.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        skips.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
         prefs.objectWillChange
@@ -299,6 +316,25 @@ final class AppState: ObservableObject {
             URLQueryItem(name: "r", value: Self.b64url(origin)),
         ]
         return comps.url?.absoluteString ?? playbackURLString(for: cdnURL)
+    }
+
+    /// Where `SkipDetector` fetches an episode's audio from: the lowest-quality stream (it only
+    /// needs the soundtrack, and it's the least data), routed like playback so a proxy still
+    /// applies. Falls back to any translation if the requested one isn't offered for the episode.
+    func skipAnalysisURL(pageURL: String, season: Int, episode: Int,
+                         translator: Int?) async throws -> URL {
+        let s: StreamResponse
+        do {
+            s = try await api.stream(url: pageURL, translation: translator,
+                                     season: season, episode: episode)
+        } catch where translator != nil {
+            s = try await api.stream(url: pageURL, translation: nil, season: season, episode: episode)
+        }
+        guard let q = s.sortedQualities.first, let cdn = s.url(for: q),
+              let url = URL(string: playbackURLString(for: cdn)) else {
+            throw APIError.transport("No stream for S\(season)E\(episode)")
+        }
+        return url
     }
 
     /// LAN-reachable URL for a *downloaded* file, served by the sidecar's `/media` endpoint. Used

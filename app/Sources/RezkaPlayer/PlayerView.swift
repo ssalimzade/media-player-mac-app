@@ -6,6 +6,8 @@ struct PlayerView: View {
     let target: PlayerTarget
     @EnvironmentObject var state: AppState
     @State private var player: AVPlayer?
+    /// What the controls drawn over the video show (episode bar, skip countdown, notices).
+    @StateObject private var overlay = PlayerOverlayModel()
 
     // Progress / autoplay bookkeeping. These track the *currently playing* item, which can
     // advance past the pushed target when autoplay chains episodes.
@@ -15,6 +17,7 @@ struct PlayerView: View {
     @State private var externalObserver: AnyCancellable?
     @State private var swapReadyObserver: AnyCancellable?
     @State private var didSeekResume = false
+    @State private var lastRecorded = Date.distantPast
 
     @State private var curSeason: Int?
     @State private var curEpisode: Int?
@@ -29,47 +32,33 @@ struct PlayerView: View {
     /// Guards against double-advancing (end-of-playback firing while a manual skip is in flight).
     @State private var advancing = false
 
-    @State private var overlayText: String?
-    @State private var overlayVisible = false
+    // Intro/credits skipping for the current item (reset whenever the item changes).
+    /// Media time a running countdown fires at (media time, so pausing pauses the countdown).
+    @State private var introSkipAt: Double?
+    @State private var creditsSkipAt: Double?
+    /// Skipped already, or the user cancelled — either way, leave this episode alone.
+    @State private var introDone = false
+    @State private var creditsDone = false
+    /// The credits countdown and the real end of the item can both fire; only act once.
+    @State private var endHandled = false
 
     var body: some View {
         Group {
             if let player {
-                ZStack {
-                    // Host AVKit's native AVPlayerView directly. We deliberately avoid SwiftUI's
-                    // `VideoPlayer`, which crashes during view-metadata instantiation on macOS 26.
-                    AVPlayerViewContainer(player: player)
-                        .onDisappear { player.pause() }
-
-                    if overlayVisible, let overlayText {
-                        VStack {
-                            HStack {
-                                Label(overlayText, systemImage: "forward.fill")
-                                    .font(.callout).bold()
-                                    .padding(.horizontal, 14).padding(.vertical, 10)
-                                    .background(.black.opacity(0.7), in: Capsule())
-                                    .foregroundStyle(.white)
-                                Spacer()
-                            }
-                            Spacer()
-                        }
-                        .padding(24)
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                    }
-                }
+                AVPlayerViewContainer(player: player, overlay: overlay)
+                    .onDisappear { player.pause() }
             } else {
                 CenteredMessage(systemImage: "play.slash", title: "Can't play this stream")
             }
         }
         .navigationTitle(curTitle.isEmpty ? target.title : curTitle)
         .toolbar {
-            // "Next Episode", Netflix-style. In the window toolbar rather than overlaid on the
-            // video, so it can't collide with AVKit's own inline controls (volume/PiP/full-screen).
+            // Mirrors the on-video bar's Next button in the window toolbar. The bar is the main
+            // control (it also works in full screen); this one is just easy to find.
             if hasNextEpisode {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        advanceToNextEpisode(auto: false)
+                        advanceToNextEpisode()
                     } label: {
                         Label("Next Episode", systemImage: "forward.end.fill")
                     }
@@ -80,6 +69,10 @@ struct PlayerView: View {
         }
         .onAppear(perform: setup)
         .onDisappear(perform: teardown)
+        .onChange(of: state.autoSkip) { _, on in
+            overlay.autoSkip = on
+            if on { requestSkipDetection() } else { setSkipPrompt(nil) }
+        }
     }
 
     // MARK: Setup / teardown
@@ -93,6 +86,7 @@ struct PlayerView: View {
         curResumeAt = target.resumeAt
         curDownloadID = target.downloadID
         curTitle = target.title
+        wireOverlay()
 
         guard let item = makeItem(cdnURLString: target.urlString, isLocal: target.isLocal) else { return }
         let p = AVPlayer(playerItem: item)
@@ -105,17 +99,39 @@ struct PlayerView: View {
         player = p
         attachObservers(to: p, item: item)
         p.play()
+        episodeChanged()
     }
 
     private func teardown() {
         // Save the exact stop position — the periodic observer only records every few seconds.
-        if let p = player { tick(time: p.currentTime()) }
+        if let p = player, let item = p.currentItem {
+            let d = item.duration.seconds, t = p.currentTime().seconds
+            if d.isFinite, d > 0, t.isFinite, t >= 0 { recordProgress(position: t, duration: d) }
+        }
         player?.pause()
         if let t = timeObserver { player?.removeTimeObserver(t); timeObserver = nil }
         if let e = endObserver { NotificationCenter.default.removeObserver(e); endObserver = nil }
         readyObserver?.cancel(); readyObserver = nil
         externalObserver?.cancel(); externalObserver = nil
         swapReadyObserver?.cancel(); swapReadyObserver = nil
+        overlay.detach()
+    }
+
+    private func wireOverlay() {
+        overlay.autoSkip = state.autoSkip
+        overlay.onPrevious = { if let ref = neighbour(-1) { jump(to: ref) } }
+        overlay.onNext = { advanceToNextEpisode() }
+        overlay.onSelect = { jump(to: $0) }
+        overlay.onSkipNow = { skipNow() }
+        overlay.onCancelSkip = { cancelSkip() }
+        overlay.onToggleAutoSkip = { state.autoSkip = $0 }
+    }
+
+    /// The playing episode changed (or playback just started): refresh the on-video controls and
+    /// make sure intro/credits detection covers this episode and the next.
+    private func episodeChanged() {
+        refreshOverlay()
+        requestSkipDetection()
     }
 
     // MARK: Item construction
@@ -143,21 +159,34 @@ struct PlayerView: View {
         return AVPlayerItem(asset: asset)
     }
 
+    /// Swap in another episode's item with fresh per-item state (resume seek, skip countdowns,
+    /// the end-of-episode guard).
+    private func load(_ item: AVPlayerItem, into p: AVPlayer, resumeAt: Double) {
+        curResumeAt = resumeAt
+        didSeekResume = false
+        introSkipAt = nil; creditsSkipAt = nil
+        introDone = false; creditsDone = false; endHandled = false
+        setSkipPrompt(nil)
+        lastRecorded = .distantPast
+
+        observeEnd(of: item)
+        observeReady(of: item)
+        p.replaceCurrentItem(with: item)
+        p.play()
+        episodeChanged()
+    }
+
     // MARK: Observers
 
     private func attachObservers(to p: AVPlayer, item: AVPlayerItem) {
-        // Periodic progress recording (~every 5s).
-        let interval = CMTime(seconds: 5, preferredTimescale: 600)
+        // Quarter-second ticks drive the skip countdown; progress is saved every ~5s of them.
+        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
         timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
             Task { @MainActor in self.tick(time: time) }
         }
         // Resume seek once the item is ready and duration is known.
-        readyObserver = item.publisher(for: \.status)
-            .receive(on: DispatchQueue.main)
-            .sink { status in
-                if status == .readyToPlay { self.seekResumeIfNeeded(item: item) }
-            }
-        // Track AirPlay engage/disengage for the on-screen overlay. No source swap is needed —
+        observeReady(of: item)
+        // Track AirPlay engage/disengage for the on-screen notice. No source swap is needed —
         // remote items already play from the LAN-IP relay the receiver can reach directly.
         externalObserver = p.publisher(for: \.isExternalPlaybackActive)
             .removeDuplicates()
@@ -167,6 +196,14 @@ struct PlayerView: View {
         observeEnd(of: item)
     }
 
+    private func observeReady(of item: AVPlayerItem) {
+        readyObserver = item.publisher(for: \.status)
+            .receive(on: DispatchQueue.main)
+            .sink { status in
+                if status == .readyToPlay { self.seekResumeIfNeeded(item: item) }
+            }
+    }
+
     /// AirPlay engaged/disengaged. Remote items need no swap — they already play from the LAN-IP
     /// relay, which the receiver can fetch directly. Downloaded files do: a `file://` path means
     /// nothing to the TV, so point it at the sidecar's `/media` URL while AirPlay is active and
@@ -174,7 +211,8 @@ struct PlayerView: View {
     private func handleExternalPlaybackChange(_ active: Bool) {
         guard active != isExternal else { return }
         isExternal = active
-        showOverlay(active ? "AirPlay — playing on TV" : "Playing on this Mac")
+        overlay.showToast(active ? String(localized: "AirPlay — playing on TV")
+                                 : String(localized: "Playing on this Mac"))
 
         // Use the *currently playing* file, which may have advanced past the pushed target.
         guard target.isLocal, let p = player, let path = currentLocalPath else { return }
@@ -230,9 +268,17 @@ struct PlayerView: View {
         let position = time.seconds
         guard position.isFinite, position >= 0 else { return }
 
-        let key = currentKey()
+        checkSkips(position: position, duration: duration)
+        if Date().timeIntervalSince(lastRecorded) >= 5 {
+            recordProgress(position: position, duration: duration)
+        }
+    }
+
+    private func recordProgress(position: Double, duration: Double) {
+        lastRecorded = Date()
         state.progress.record(
-            id: key, title: target.title, pageURL: target.pageURL ?? target.urlString,
+            id: currentKey(), title: curTitle.isEmpty ? target.title : curTitle,
+            pageURL: target.pageURL ?? target.urlString,
             posterURL: target.posterURL, season: curSeason, episode: curEpisode,
             translatorId: curTranslatorId, quality: curQuality,
             position: position, duration: duration)
@@ -243,9 +289,121 @@ struct PlayerView: View {
         return ProgressStore.key(pageURL: page, season: curSeason, episode: curEpisode)
     }
 
+    // MARK: Intro / credits skipping
+
+    /// Seconds of on-screen countdown before an automatic skip.
+    private static let skipLead: Double = 3
+
+    /// Runs every tick. Shows a countdown as playback reaches a detected intro (then jumps to its
+    /// end) or the credits (then plays the next episode). The seek happens on the AVPlayer, so it
+    /// also skips on an AirPlay TV — only the countdown itself is drawn on the Mac.
+    private func checkSkips(position t: Double, duration: Double) {
+        guard target.isSeries, let m = state.skips.markers(for: currentKey()) else {
+            return setSkipPrompt(nil)
+        }
+        let lead = Self.skipLead
+
+        if let intro = m.intro, !introDone, t >= intro.lowerBound - lead, t < intro.upperBound - 1 {
+            if state.autoSkip {
+                let fireAt = introSkipAt ?? max(intro.lowerBound, t + lead)
+                introSkipAt = fireAt
+                if t >= fireAt {
+                    skipIntro(to: intro.upperBound)
+                } else {
+                    setSkipPrompt(.init(kind: .intro, remaining: Int((fireAt - t).rounded(.up))))
+                }
+            } else {
+                setSkipPrompt(t >= intro.lowerBound ? .init(kind: .intro, remaining: nil) : nil)
+            }
+            return
+        }
+        introSkipAt = nil   // outside the intro (e.g. seeked past it): drop any countdown
+
+        // Credits only make sense to skip when there's an episode to go to; a marker in the
+        // first half is a misdetection.
+        if let cs = m.creditsStart, !creditsDone, cs > duration * 0.5,
+           t >= cs - lead, t < duration - 1, neighbour(+1) != nil {
+            if state.autoSkip {
+                let fireAt = creditsSkipAt ?? max(cs, t + lead)
+                creditsSkipAt = fireAt
+                if t >= fireAt {
+                    creditsDone = true
+                    handleEnd()
+                } else {
+                    setSkipPrompt(.init(kind: .credits, remaining: Int((fireAt - t).rounded(.up))))
+                }
+            } else {
+                setSkipPrompt(t >= cs ? .init(kind: .credits, remaining: nil) : nil)
+            }
+            return
+        }
+        creditsSkipAt = nil
+        setSkipPrompt(nil)
+    }
+
+    private func setSkipPrompt(_ p: PlayerOverlayModel.SkipPrompt?) {
+        if overlay.skip != p { overlay.skip = p }
+    }
+
+    private func skipIntro(to end: Double) {
+        introDone = true
+        introSkipAt = nil
+        setSkipPrompt(nil)
+        player?.seek(to: CMTime(seconds: end, preferredTimescale: 600),
+                     toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600))
+        overlay.showToast(String(localized: "Skipped intro"))
+    }
+
+    /// "Skip Now" / "Play Now" / the manual Skip button.
+    private func skipNow() {
+        guard let kind = overlay.skip?.kind else { return }
+        switch kind {
+        case .intro:
+            if let end = state.skips.markers(for: currentKey())?.intro?.upperBound { skipIntro(to: end) }
+        case .credits:
+            creditsDone = true
+            handleEnd()
+        }
+    }
+
+    private func cancelSkip() {
+        switch overlay.skip?.kind {
+        case .intro: introDone = true; introSkipAt = nil
+        case .credits: creditsDone = true; creditsSkipAt = nil
+        case nil: break
+        }
+        setSkipPrompt(nil)
+    }
+
+    /// Kick off detection for the playing episode (and pre-analysis of the next one) against its
+    /// neighbours. Cheap when markers already exist; off entirely when auto-skip is off.
+    private func requestSkipDetection() {
+        guard state.autoSkip, let page = target.pageURL, let cur = currentRef else { return }
+        let refs = [neighbour(+1), neighbour(-1)].compactMap { $0 }
+        guard !refs.isEmpty else { return }
+        let current = skipEpisode(cur, page: page)
+        let neighbours = refs.map { skipEpisode($0, page: page) }
+        let detector = state.skipDetector
+        Task { await detector.prepare(current: current, neighbours: neighbours) }
+    }
+
+    /// Detection input for an episode: its download when there is one (no network needed),
+    /// else the stream in the current translation.
+    private func skipEpisode(_ ref: EpisodeRef, page: String) -> SkipEpisode {
+        let key = ProgressStore.key(pageURL: page, season: ref.season, episode: ref.episode)
+        if let item = downloadedEpisodes.first(where: { $0.ref == ref })?.item {
+            return SkipEpisode(key: key, location: .file(state.downloads.localURL(for: item)))
+        }
+        return SkipEpisode(key: key, location: .stream(pageURL: page, season: ref.season,
+                                                        episode: ref.episode, translator: curTranslatorId))
+    }
+
     // MARK: End-of-playback + autoplay
 
     private func handleEnd() {
+        guard !endHandled else { return }
+        endHandled = true
+        setSkipPrompt(nil)
         state.progress.markFinished(id: currentKey())
         state.watched.mark(url: target.pageURL ?? target.urlString,
                            title: target.title, posterURL: target.posterURL)
@@ -266,10 +424,43 @@ struct PlayerView: View {
             }
         }
 
-        advanceToNextEpisode(auto: true)
+        advanceToNextEpisode()
     }
 
-    // MARK: Next episode (streamed + downloaded)
+    // MARK: Episode navigation (streamed + downloaded)
+
+    private var currentRef: EpisodeRef? {
+        guard let s = curSeason, let e = curEpisode else { return nil }
+        return EpisodeRef(season: s, episode: e)
+    }
+
+    /// Completed downloads of this series, in watch order.
+    private var downloadedEpisodes: [(ref: EpisodeRef, item: DownloadItem)] {
+        guard let page = target.pageURL else { return [] }
+        return state.downloads.downloadedEpisodes(ofPage: page).compactMap { item in
+            item.seasonEpisodeNumbers.map { (EpisodeRef(season: $0.season, episode: $0.episode), item) }
+        }
+    }
+
+    /// The episodes previous/next walk: downloaded ones for local playback (they have to be
+    /// watchable offline), else the whole series — across seasons — for streams.
+    private var episodeOrder: [EpisodeRef] {
+        if target.isLocal { return downloadedEpisodes.map(\.ref) }
+        guard target.pageURL != nil else { return [] }
+        if let all = target.allEpisodes { return all }
+        guard let s = target.season, let list = target.episodeList else { return [] }
+        return list.map { EpisodeRef(season: s, episode: $0) }
+    }
+
+    private func neighbour(_ offset: Int) -> EpisodeRef? {
+        let order = episodeOrder
+        guard let cur = currentRef, let i = order.firstIndex(of: cur),
+              order.indices.contains(i + offset) else { return nil }
+        return order[i + offset]
+    }
+
+    /// Drives the toolbar button's visibility; recomputes as episodes advance.
+    private var hasNextEpisode: Bool { neighbour(+1) != nil }
 
     /// File path of the local item actually playing — follows episode advances, unlike
     /// `target.urlString`, which stays pinned to whatever was pushed.
@@ -281,65 +472,62 @@ struct PlayerView: View {
         return target.urlString
     }
 
-    /// Next downloaded episode of this series, or nil.
-    private func nextDownload() -> DownloadItem? {
-        guard let id = curDownloadID, let cur = state.downloads.item(withID: id) else { return nil }
-        return state.downloads.nextDownloadedEpisode(after: cur)
+    /// Play the next episode — from end-of-playback, the credits countdown, or a button.
+    private func advanceToNextEpisode() {
+        if let next = neighbour(+1) { jump(to: next) }
     }
 
-    /// Next episode number in the streamed season's list, or nil.
-    private func nextStreamEpisode() -> Int? {
-        guard target.pageURL != nil, let list = target.episodeList, let cur = curEpisode,
-              let idx = list.firstIndex(of: cur), idx + 1 < list.count else { return nil }
-        return list[idx + 1]
-    }
-
-    /// Drives the toolbar button's visibility; recomputes as episodes advance.
-    private var hasNextEpisode: Bool {
-        target.isLocal ? nextDownload() != nil : nextStreamEpisode() != nil
-    }
-
-    /// Play the next episode — from end-of-playback (`auto: true`) or the toolbar button.
-    private func advanceToNextEpisode(auto: Bool) {
-        guard !advancing else { return }
+    /// Switch to another episode of the series, resuming it if it was part-watched.
+    private func jump(to ref: EpisodeRef) {
+        guard !advancing, ref != currentRef else { return }
+        let resume = savedResume(for: ref)
         if target.isLocal {
-            guard let next = nextDownload() else { return }
-            advancing = true
-            play(downloaded: next)
+            guard let item = downloadedEpisodes.first(where: { $0.ref == ref })?.item else { return }
+            play(downloaded: item, ref: ref, resumeAt: resume)
         } else {
-            guard let next = nextStreamEpisode() else { return }
-            advancing = true
-            play(streamedEpisode: next)
+            play(streamed: ref, resumeAt: resume)
         }
     }
 
-    private func play(downloaded next: DownloadItem) {
-        defer { advancing = false }
+    private func savedResume(for ref: EpisodeRef) -> Double {
+        let key = ProgressStore.key(pageURL: target.pageURL ?? target.urlString,
+                                    season: ref.season, episode: ref.episode)
+        guard let e = state.progress.entry(id: key), !e.isComplete else { return 0 }
+        return e.position
+    }
+
+    private func play(downloaded next: DownloadItem, ref: EpisodeRef, resumeAt: Double) {
         guard let p = player,
               let item = makeItem(cdnURLString: state.downloads.localURL(for: next).path,
                                   isLocal: true) else { return }
-        // Advance bookkeeping so a further "next" (and the AirPlay swap) uses the new episode.
+        // Advance bookkeeping so progress, a further "next" and the AirPlay swap use the new
+        // episode (the season/episode drive the progress key).
         curDownloadID = next.id
+        curSeason = ref.season
+        curEpisode = ref.episode
         curTitle = next.title
-        didSeekResume = true       // no resume for a freshly-started next episode
-        curResumeAt = 0
-
-        observeEnd(of: item)
-        p.replaceCurrentItem(with: item)
-        p.play()
-        showOverlay("Playing \(next.seasonEpisode ?? next.title)…")
+        load(item, into: p, resumeAt: resumeAt)
+        overlay.showToast(String(localized: "Playing \(ref.tag)…"))
     }
 
-    private func play(streamedEpisode next: Int) {
-        guard let pageURL = target.pageURL else { advancing = false; return }
-        let season = curSeason
+    private func play(streamed ref: EpisodeRef, resumeAt: Double) {
+        guard let pageURL = target.pageURL else { return }
+        advancing = true
         let translator = curTranslatorId
+        overlay.showToast(String(localized: "Loading \(ref.tag)…"))
 
         Task { @MainActor in
             defer { advancing = false }
             do {
-                let s = try await state.api.stream(
-                    url: pageURL, translation: translator, season: season, episode: next)
+                let s: StreamResponse
+                do {
+                    s = try await state.api.stream(url: pageURL, translation: translator,
+                                                   season: ref.season, episode: ref.episode)
+                } catch where translator != nil {
+                    // This episode isn't offered in the current translation: take what it has.
+                    s = try await state.api.stream(url: pageURL, translation: nil,
+                                                   season: ref.season, episode: ref.episode)
+                }
                 // Pick the preferred quality if still offered, else the best available.
                 let q: String? = {
                     if let cq = curQuality, s.videos[cq] != nil { return cq }
@@ -347,37 +535,53 @@ struct PlayerView: View {
                 }()
                 guard let q, let cdn = s.url(for: q),
                       let item = makeItem(cdnURLString: cdn, isLocal: false),
-                      let p = player else { return }
+                      let p = player else {
+                    overlay.showToast(String(localized: "Couldn't load \(ref.tag)"))
+                    return
+                }
 
                 // Advance bookkeeping so progress + further autoplay use the new episode.
-                curEpisode = next
+                curSeason = ref.season
+                curEpisode = ref.episode
                 curQuality = q
-                didSeekResume = true
-                curResumeAt = 0
-
-                observeEnd(of: item)
-                p.replaceCurrentItem(with: item)
-                p.play()
-                showOverlay("Playing S\(season ?? 0)E\(next)…")
+                if let t = s.translatorId { curTranslatorId = t }
+                curTitle = "\(target.seriesName ?? target.title) · \(ref.tag)"
+                load(item, into: p, resumeAt: resumeAt)
+                overlay.showToast(String(localized: "Playing \(ref.tag)…"))
             } catch {
-                showOverlay("Couldn't load the next episode")
+                overlay.showToast(String(localized: "Couldn't load \(ref.tag)"))
             }
         }
     }
 
-    private func showOverlay(_ text: String) {
-        overlayText = text
-        withAnimation(.easeIn(duration: 0.25)) { overlayVisible = true }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            withAnimation(.easeOut(duration: 0.6)) { overlayVisible = false }
+    // MARK: On-video controls
+
+    private func refreshOverlay() {
+        let order = episodeOrder
+        overlay.isSeries = target.isSeries && !order.isEmpty
+        overlay.title = target.seriesName ?? ""
+        overlay.episodeLabel = currentRef?.tag
+        overlay.canPrevious = neighbour(-1) != nil
+        overlay.canNext = neighbour(+1) != nil
+
+        let page = target.pageURL ?? target.urlString
+        let cur = currentRef
+        let bySeason = Dictionary(grouping: order, by: \.season)
+        overlay.sections = bySeason.keys.sorted().map { s in
+            EpisodeMenuSection(season: s, items: bySeason[s, default: []].map { ref in
+                let key = ProgressStore.key(pageURL: page, season: ref.season, episode: ref.episode)
+                return EpisodeMenuItem(ref: ref, current: ref == cur,
+                                       watched: state.progress.entry(id: key)?.isComplete == true)
+            })
         }
     }
 }
 
-/// Native AppKit AVKit player view, with inline controls, full-screen toggle and PiP.
+/// Native AppKit AVKit player view, with inline controls, full-screen toggle and PiP. Our own
+/// controls are installed into its content overlay so they follow it into full screen.
 private struct AVPlayerViewContainer: NSViewRepresentable {
     let player: AVPlayer
+    let overlay: PlayerOverlayModel
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
@@ -386,6 +590,9 @@ private struct AVPlayerViewContainer: NSViewRepresentable {
         view.allowsPictureInPicturePlayback = true
         view.showsFullScreenToggleButton = true
         view.videoGravity = .resizeAspect
+        if let content = view.contentOverlayView {
+            PlayerOverlayHost.install(in: content, model: overlay)
+        }
         return view
     }
 
