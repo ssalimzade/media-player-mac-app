@@ -18,6 +18,13 @@ final class ProgressStore: ObservableObject {
         var duration: Double    // seconds
         var updatedAt: Date
         var finished: Bool
+
+        /// Finished, or stopped so close to the end (typically in the credits) that there's
+        /// nothing left worth resuming. Playback rarely reaches DidPlayToEndTime — the window gets
+        /// closed once the credits roll — so `finished` alone under-reports.
+        var isComplete: Bool {
+            finished || (duration > 0 && duration - position < max(60, duration * 0.04))
+        }
     }
 
     @Published private(set) var items: [Entry] = []

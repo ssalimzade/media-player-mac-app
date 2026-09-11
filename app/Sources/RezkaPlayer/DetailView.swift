@@ -370,7 +370,7 @@ struct DetailView: View {
         let epList: [Int]? = isSeries ? selectedSeasonEpisodes() : nil
         let key = ProgressStore.key(pageURL: item.url, season: s, episode: e)
         let saved = state.progress.entry(id: key)
-        let resume = (saved?.finished == false) ? (saved?.position ?? 0) : 0
+        let resume = (saved?.isComplete == false) ? (saved?.position ?? 0) : 0
         return PlayerTarget(
             title: titleForPlayback(), urlString: url, isLocal: false,
             subtitleURL: stream.subtitles.first?.link,
@@ -394,8 +394,26 @@ struct DetailView: View {
         let key = ProgressStore.key(pageURL: item.url,
                                     season: isSeries ? seasonID : nil,
                                     episode: isSeries ? episodeID : nil)
-        guard let e = state.progress.entry(id: key), !e.finished else { return 0 }
+        guard let e = state.progress.entry(id: key), !e.isComplete else { return 0 }
         return e.position
+    }
+
+    /// Where to pick a series back up: the most recently played episode, or — once that one is
+    /// done — the episode after it (crossing into the next season). Nil when nothing has been
+    /// played yet or the saved episode is no longer listed on the page.
+    private func resumeEpisode(in info: TitleInfo) -> (season: Int, episode: Int)? {
+        guard let last = state.progress.latestForPage(item.url),
+              let s = last.season, let e = last.episode else { return nil }
+        let seasons = info.episodes ?? []
+        guard let si = seasons.firstIndex(where: { $0.season == s }),
+              let ei = seasons[si].episodes.firstIndex(where: { $0.episode == e }) else { return nil }
+        guard last.isComplete else { return (s, e) }
+        let eps = seasons[si].episodes
+        if ei + 1 < eps.count { return (s, eps[ei + 1].episode) }
+        if si + 1 < seasons.count, let first = seasons[si + 1].episodes.first {
+            return (seasons[si + 1].season, first.episode)
+        }
+        return (s, e)   // finished the final episode: stay on it
     }
 
     private func titleForPlayback() -> String {
@@ -424,10 +442,16 @@ struct DetailView: View {
             if info.isSeries {
                 seasonID = info.episodes?.first?.season
                 episodeID = info.episodes?.first?.episodes.first?.episode
+                // Reopen on the episode you were watching (or the next one if you finished it).
+                if let resume = resumeEpisode(in: info) {
+                    seasonID = resume.season; episodeID = resume.episode
+                }
             }
-            // Apply the remembered translator for this title as an initial default, but only
-            // if it's valid for the current movie/episode (refetch() re-validates regardless).
-            if let remembered = state.prefs.translator(for: item.url),
+            // Apply the remembered translator for this title as an initial default — the one
+            // explicitly picked, else the one last played — but only if it's valid for the
+            // current movie/episode (refetch() re-validates regardless).
+            if let remembered = state.prefs.translator(for: item.url)
+                ?? state.progress.latestForPage(item.url)?.translatorId,
                availableTranslators(info).contains(where: { $0.id == remembered }) {
                 translatorID = remembered
             }

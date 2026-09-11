@@ -108,6 +108,8 @@ struct PlayerView: View {
     }
 
     private func teardown() {
+        // Save the exact stop position — the periodic observer only records every few seconds.
+        if let p = player { tick(time: p.currentTime()) }
         player?.pause()
         if let t = timeObserver { player?.removeTimeObserver(t); timeObserver = nil }
         if let e = endObserver { NotificationCenter.default.removeObserver(e); endObserver = nil }
