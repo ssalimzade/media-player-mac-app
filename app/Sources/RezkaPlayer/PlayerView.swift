@@ -379,7 +379,9 @@ struct PlayerView: View {
     /// neighbours. Cheap when markers already exist; off entirely when auto-skip is off.
     private func requestSkipDetection() {
         guard state.autoSkip, let page = target.pageURL, let cur = currentRef else { return }
-        let refs = [neighbour(+1), neighbour(-1)].compactMap { $0 }
+        // Next first (it's pre-analysed too), then previous, then the one after next — so a
+        // single odd neighbour (a recap episode, a differently mixed dub) can't hide the intro.
+        let refs = [neighbour(+1), neighbour(-1), neighbour(+2)].compactMap { $0 }
         guard !refs.isEmpty else { return }
         let current = skipEpisode(cur, page: page)
         let neighbours = refs.map { skipEpisode($0, page: page) }

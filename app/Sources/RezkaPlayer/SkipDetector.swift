@@ -47,6 +47,17 @@ actor SkipDetector {
     init(store: SkipStore, resolveStream: @escaping StreamResolver) {
         self.store = store
         self.resolveStream = resolveStream
+        Self.removeStaleSparseFiles()
+    }
+
+    /// Sparse copies are deleted after each run, but a crash mid-run would leave them behind
+    /// (tens of MB each). Nothing is running yet when the detector is created, so clear them all.
+    private static func removeStaleSparseFiles() {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+        for name in (try? fm.contentsOfDirectory(atPath: tmp.path)) ?? [] where name.hasPrefix("rezka-skip-") {
+            try? fm.removeItem(at: tmp.appendingPathComponent(name))
+        }
     }
 
     // MARK: Tunables
@@ -425,9 +436,25 @@ extension SkipDetector {
             return (asset, track, d)
         }
 
+        /// Optional trace of range fetches and retries (unset in the app; diagnostics set it).
+        static var log: ((String) -> Void)?
+
         /// Mono float PCM at `sampleRate` for [start, start + length).
         func decode(from start: Double, length: Double) async throws -> [Float] {
-            if remote != nil { try await fill(from: start, to: start + length) }
+            guard remote != nil else { return try read(from: start, length: length) }
+            try await fill(from: start, to: start + length, generous: false)
+            do {
+                return try read(from: start, length: length)
+            } catch {
+                // The sample table's offsets fell short somewhere: take a generous,
+                // bitrate-proportional range around the window and try once more.
+                Self.log?("decode \(Int(start))s+\(Int(length))s failed (\(error.localizedDescription)); widening")
+                try await fill(from: start, to: start + length, generous: true)
+                return try read(from: start, length: length)
+            }
+        }
+
+        private func read(from start: Double, length: Double) throws -> [Float] {
             let reader = try AVAssetReader(asset: asset)
             let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
                 AVFormatIDKey: kAudioFormatLinearPCM,
@@ -463,21 +490,27 @@ extension SkipDetector {
         /// Fetch the bytes holding audio for [t0, t1] into the sparse file. The sample table
         /// says exactly where those audio chunks live; the video interleaved between them comes
         /// along, but nothing outside the window does.
-        private func fill(from t0: Double, to t1: Double) async throws {
+        private func fill(from t0: Double, to t1: Double, generous: Bool) async throws {
             guard let remote else { return }
             var lo: Int64, hi: Int64
-            if let c0 = track.makeSampleCursor(presentationTimeStamp: CMTime(seconds: t0, preferredTimescale: 600)),
-               let c1 = track.makeSampleCursor(presentationTimeStamp: CMTime(seconds: t1, preferredTimescale: 600)) {
+            // Asking for the sample at exactly the end can land anywhere; stay inside the track.
+            let end = min(t1, duration - 0.5)
+            if !generous,
+               let c0 = track.makeSampleCursor(presentationTimeStamp: CMTime(seconds: t0, preferredTimescale: 600)),
+               let c1 = track.makeSampleCursor(presentationTimeStamp: CMTime(seconds: end, preferredTimescale: 600)),
+               c1.currentChunkStorageRange.offset >= c0.currentChunkStorageRange.offset {
                 let r0 = c0.currentChunkStorageRange, r1 = c1.currentChunkStorageRange
-                lo = r0.offset
-                hi = r1.offset + r1.length - 1
+                lo = r0.offset - (1 << 20)          // slack for interleaving / decoder priming
+                hi = r1.offset + r1.length + (1 << 20)
             } else {
-                // No sample cursor: estimate from the average bitrate, generously.
+                // No usable sample cursor (or a retry): estimate from the average bitrate.
                 let bps = Double(totalBytes) / duration
-                lo = Int64(t0 * bps * 0.85) - (2 << 20)
-                hi = Int64(t1 * bps * 1.15) + (2 << 20)
+                lo = Int64(t0 * bps * 0.8) - (4 << 20)
+                hi = Int64(t1 * bps * 1.2) + (4 << 20)
             }
+            if t1 >= duration - 1 { hi = totalBytes - 1 }   // a window at the end takes the rest
             lo = max(0, lo); hi = min(totalBytes - 1, max(lo, hi))
+            Self.log?("fill \(Int(t0))–\(Int(t1))s → bytes \(lo)–\(hi) (\((hi - lo) >> 20) MB)\(generous ? " generous" : "")")
 
             // Skip what's already on disk (the moov probe, or an overlapping earlier window).
             for gap in missing(lo...hi) {
