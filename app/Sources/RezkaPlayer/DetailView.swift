@@ -110,7 +110,10 @@ struct DetailView: View {
                 HStack(spacing: 8) {
                     if let y = info.releaseYear { Badge(text: String(y), system: "calendar") }
                     if let r = info.rating { Badge(text: String(format: "%.2f", r.value), system: "star.fill") }
-                    if let c = info.category?.name { Badge(text: c.capitalized, system: "tag") }
+                    // The category only adds something when it isn't just "series"/"films" again.
+                    if let c = info.category?.name, !["series", "films"].contains(c.lowercased()) {
+                        Badge(text: c.capitalized, system: "tag")
+                    }
                     Badge(text: info.isSeries ? String(localized: "Series") : String(localized: "Movie"),
                           system: info.isSeries ? "tv" : "film")
                     if let n = seasonCount(info), n > 0 {

@@ -124,10 +124,16 @@ struct StreamResponse: Codable {
 }
 
 enum Quality {
-    /// Extract a comparable numeric height from a label like "1080p Ultra" -> 1080.
+    /// A comparable height for a quality label. HDRezka mixes styles: "720p", "1080p Ultra"
+    /// (ranked just above plain 1080p), and "2K"/"4K" (1440/2160 — reading only the leading
+    /// digits sorted those *below* 360p, so "best" and "lowest" picked the wrong streams).
     static func height(_ label: String) -> Int {
-        let digits = label.prefix { $0.isNumber }
-        return Int(digits) ?? 0
+        let digits = Int(label.prefix { $0.isNumber }) ?? 0
+        let rest = label.drop { $0.isNumber }.trimmingCharacters(in: .whitespaces).lowercased()
+        var h = digits
+        if rest.hasPrefix("k") { h = digits == 2 ? 1440 : digits * 540 }   // 4K → 2160, 8K → 4320
+        if rest.contains("ultra") { h += 1 }
+        return h
     }
 }
 
