@@ -57,6 +57,10 @@ final class DownloadManager: NSObject, ObservableObject {
     /// Task ids we cancelled intentionally for a pause, so the completion delegate
     /// doesn't mark them failed.
     private var pausingTasks: Set<Int> = []
+    /// When each task last published its byte count. URLSession reports every few KB, and each
+    /// publish re-rendered the whole app (AppState re-publishes this store) and rewrote
+    /// library.json — the UI crawled while anything downloaded. Twice a second is plenty.
+    private var lastProgressPublish: [Int: Date] = [:]
     private let fm = FileManager.default
 
     override init() {
@@ -280,10 +284,11 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-    private func update(_ item: DownloadItem) {
+    /// `persist: false` for byte-count ticks — the file only needs the state changes.
+    private func update(_ item: DownloadItem, persist: Bool = true) {
         if let idx = items.firstIndex(where: { $0.id == item.id }) {
             items[idx] = item
-            save()
+            if persist { save() }
         }
     }
 
@@ -318,10 +323,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
                                totalBytesExpectedToWrite: Int64) {
         let tid = downloadTask.taskIdentifier
         Task { @MainActor in
+            let now = Date()
+            if let last = self.lastProgressPublish[tid], now.timeIntervalSince(last) < 0.5 { return }
+            self.lastProgressPublish[tid] = now
             guard var it = self.item(forTask: tid) else { return }
             it.bytesReceived = totalBytesWritten
             it.totalBytes = totalBytesExpectedToWrite
-            self.update(it)
+            self.update(it, persist: false)
         }
     }
 

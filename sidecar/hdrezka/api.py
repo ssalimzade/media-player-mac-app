@@ -448,6 +448,13 @@ class HdRezkaApi():
 
 
 		if self.type == TVSeries:
+			# VENDOR PATCH (ours): with a numeric translator there's nothing to choose, so skip
+			# validating it against `episodesInfo` — which fetches EVERY translator's episode
+			# list (one get_cdn_series call each, ~0.4 s apiece). The CDN call itself errors if
+			# that translator lacks the episode.
+			if season and episode and translation and str(translation).isnumeric() \
+					and int(translation) in self.translators:
+				return getStreamSeries(self, int(season), int(episode), int(translation))
 			if season and episode:
 				episodes = next((s['episodes'] for s in self.episodesInfo if s['season'] == int(season)), None)
 				if not episodes:

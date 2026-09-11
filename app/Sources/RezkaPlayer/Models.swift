@@ -88,6 +88,9 @@ struct TitleInfo: Codable, Hashable {
     let isSeries: Bool
     var translators: [Translator]
     var episodes: [SeasonInfo]?
+    /// Whose episode list `episodes` is (series only) — the sidecar lists one translator's at a
+    /// time, as fetching every translator's cost a request each.
+    var episodesTranslator: Int?
     var similar: [CatalogueItem]?
 }
 

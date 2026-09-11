@@ -43,8 +43,12 @@ final class APIClient {
         return r.results
     }
 
-    func info(url: String) async throws -> TitleInfo {
-        try await post("/info", ["url": url])
+    /// Title metadata. For a series, `translation` picks whose episode list comes back (each
+    /// translation has its own); the sidecar falls back to the page's default translator.
+    func info(url: String, translation: Int? = nil) async throws -> TitleInfo {
+        var body: [String: Any] = ["url": url]
+        if let translation { body["translation"] = translation }
+        return try await post("/info", body)
     }
 
     struct LoginResponse: Decodable {
@@ -67,6 +71,14 @@ final class APIClient {
         if let season { body["season"] = season }
         if let episode { body["episode"] = episode }
         return try await post("/stream", body)
+    }
+
+    struct WarmResponse: Decodable { let ok: Bool }
+
+    /// Have the sidecar resolve a CDN link's redirect and open a connection to its storage node
+    /// before the player asks for it. Returns at once; the work happens in the background.
+    func warm(url: String) async throws {
+        let _: WarmResponse = try await post("/warm", ["url": url])
     }
 
     // MARK: Plumbing

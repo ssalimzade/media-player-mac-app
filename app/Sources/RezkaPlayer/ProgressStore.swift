@@ -27,8 +27,14 @@ final class ProgressStore: ObservableObject {
         }
     }
 
-    @Published private(set) var items: [Entry] = []
+    @Published private(set) var items: [Entry] = [] { didSet { reindex() } }
     private let fm = FileManager.default
+
+    // Lookups every poster tile and episode chip makes on each redraw — kept as indexes rather
+    // than scanning (and sorting) up to `cap` entries per call.
+    private var indexByID: [String: Int] = [:]
+    private var latestByPage: [String: Entry] = [:]
+    private var resumable: [Entry] = []
     /// One entry per episode, so this must hold whole series' watch history (the title page's
     /// episode ✓ marks read from it) — entries are tiny.
     private let cap = 2000
@@ -49,7 +55,7 @@ final class ProgressStore: ObservableObject {
     func record(id: String, title: String, pageURL: String, posterURL: String?,
                 season: Int?, episode: Int?, translatorId: Int?, quality: String?,
                 position: Double, duration: Double, finished: Bool = false) {
-        if let idx = items.firstIndex(where: { $0.id == id }) {
+        if let idx = indexByID[id] {
             var e = items[idx]
             e.title = title
             e.pageURL = pageURL
@@ -78,7 +84,7 @@ final class ProgressStore: ObservableObject {
         save()
     }
 
-    func entry(id: String) -> Entry? { items.first { $0.id == id } }
+    func entry(id: String) -> Entry? { indexByID[id].map { items[$0] } }
 
     /// Resume fraction (0…1) to draw on a poster tile for `pageURL`, or nil when there's no
     /// meaningful unfinished progress. Uses the most-recent entry for the page (any episode).
@@ -89,22 +95,27 @@ final class ProgressStore: ObservableObject {
     }
 
     /// Resumable, recently-watched entries (unfinished, meaningfully started), newest first.
-    func recent(limit: Int = 30) -> [Entry] {
-        items.filter { !$0.finished && $0.position > 30 }
-            .sorted { $0.updatedAt > $1.updatedAt }
-            .prefix(limit)
-            .map { $0 }
-    }
+    func recent(limit: Int = 30) -> [Entry] { Array(resumable.prefix(limit)) }
 
     /// Most recent entry (finished or not) for a given page URL, used to recall last prefs.
-    func latestForPage(_ pageURL: String) -> Entry? {
-        items.filter { $0.pageURL == pageURL }
+    func latestForPage(_ pageURL: String) -> Entry? { latestByPage[pageURL] }
+
+    private func reindex() {
+        var ids = [String: Int](minimumCapacity: items.count)
+        var latest: [String: Entry] = [:]
+        for (i, e) in items.enumerated() {
+            ids[e.id] = i
+            if let cur = latest[e.pageURL], cur.updatedAt >= e.updatedAt { continue }
+            latest[e.pageURL] = e
+        }
+        indexByID = ids
+        latestByPage = latest
+        resumable = items.filter { !$0.finished && $0.position > 30 }
             .sorted { $0.updatedAt > $1.updatedAt }
-            .first
     }
 
     func markFinished(id: String) {
-        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = indexByID[id] else { return }
         items[idx].finished = true
         items[idx].updatedAt = Date()
         save()
@@ -169,6 +180,7 @@ final class ProgressStore: ObservableObject {
         guard let data = try? Data(contentsOf: file),
               let decoded = try? JSONDecoder().decode([Entry].self, from: data) else { return }
         items = decoded
+        reindex()   // observers don't fire during init
     }
 
     private func save() {

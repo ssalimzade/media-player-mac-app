@@ -277,9 +277,10 @@ struct DetailView: View {
                 Picker("Translation", selection: Binding(
                     get: { translatorID ?? translators.first?.id },
                     set: { newValue in
+                        guard newValue != translatorID else { return }
                         translatorID = newValue
                         if let tid = newValue { state.prefs.setTranslator(tid, for: item.url) }
-                        Task { await refetch() }
+                        Task { await switchTranslator() }
                     })
                 ) {
                     ForEach(translators) { t in
@@ -297,7 +298,10 @@ struct DetailView: View {
             Text("Quality").foregroundStyle(.secondary)
             Picker("Quality", selection: Binding(
                 get: { quality ?? stream.sortedQualities.last ?? "" },
-                set: { quality = $0; state.preferredQuality = $0 })
+                set: {
+                    quality = $0; state.preferredQuality = $0
+                    if let url = stream.url(for: $0) { state.warmStream(url) }
+                })
             ) {
                 ForEach(stream.sortedQualities, id: \.self) { q in Text(q).tag(q) }
             }
@@ -425,21 +429,9 @@ struct DetailView: View {
         return .new
     }
 
-    private func availableTranslators(_ info: TitleInfo) -> [Translator] {
-        guard info.isSeries else { return info.translators }
-        let seasons = info.episodes ?? []
-        let sid = seasonID ?? seasons.first?.season
-        let eps = seasons.first { $0.season == sid }?.episodes ?? []
-        let eid = episodeID ?? eps.first?.episode
-        let trans = eps.first { $0.episode == eid }?.translations ?? []
-        // Map episode translations into Translator, de-duped, preserving order.
-        var seen = Set<Int>()
-        return trans.compactMap { t in
-            guard !seen.contains(t.translator_id) else { return nil }
-            seen.insert(t.translator_id)
-            return Translator(id: t.translator_id, name: t.translator_name, premium: t.premium)
-        }
-    }
+    /// Every translation the title offers. For a series, picking another one reloads the episode
+    /// list, since each translation carries its own (see `switchTranslator`).
+    private func availableTranslators(_ info: TitleInfo) -> [Translator] { info.translators }
 
     private func currentQuality(_ stream: StreamResponse) -> String? {
         quality ?? stream.sortedQualities.last
@@ -560,24 +552,23 @@ struct DetailView: View {
         loading = true; loadError = nil
         defer { loading = false }
         do {
-            let info = try await state.api.info(url: item.url)
+            // The remembered translator for this title — the one explicitly picked, else the one
+            // last played. For a series it also decides whose episode list comes back.
+            let remembered = state.prefs.translator(for: item.url)
+                ?? state.progress.latestForPage(item.url)?.translatorId
+            let info = try await state.api.info(url: item.url, translation: remembered)
             self.info = info
-            translatorID = info.translators.first?.id
             if info.isSeries {
+                translatorID = info.episodesTranslator ?? info.translators.first?.id
                 seasonID = info.episodes?.first?.season
                 episodeID = info.episodes?.first?.episodes.first?.episode
                 // Reopen on the episode you were watching (or the next one if you finished it).
                 if let resume = resumeEpisode(in: info) {
                     seasonID = resume.season; episodeID = resume.episode
                 }
-            }
-            // Apply the remembered translator for this title as an initial default — the one
-            // explicitly picked, else the one last played — but only if it's valid for the
-            // current movie/episode (refetch() re-validates regardless).
-            if let remembered = state.prefs.translator(for: item.url)
-                ?? state.progress.latestForPage(item.url)?.translatorId,
-               availableTranslators(info).contains(where: { $0.id == remembered }) {
-                translatorID = remembered
+            } else {
+                translatorID = info.translators.first { $0.id == remembered }?.id
+                    ?? info.translators.first?.id
             }
             await refetch()
         } catch {
@@ -585,12 +576,36 @@ struct DetailView: View {
         }
     }
 
+    /// Another translation was picked. A series reloads its episode list for it — translations
+    /// differ in what they carry — keeping the selected episode when the new one has it too.
+    private func switchTranslator() async {
+        guard let current = info, current.isSeries, let tid = translatorID,
+              current.episodesTranslator != tid else { return await refetch() }
+        streamLoading = true; streamError = nil; stream = nil
+        if let fresh = try? await state.api.info(url: item.url, translation: tid) {
+            guard translatorID == tid else { return }   // picked another one meanwhile
+            info = fresh
+            let seasons = fresh.episodes ?? []
+            let stillThere = seasons.contains { s in
+                s.season == seasonID && s.episodes.contains { $0.episode == episodeID }
+            }
+            if !stillThere {
+                let season = seasons.first { $0.season == seasonID } ?? seasons.first
+                seasonID = season?.season
+                episodeID = season?.episodes.first?.episode
+            }
+            // The sidecar falls back to the default list if this translator's won't load.
+            if let listed = fresh.episodesTranslator { translatorID = listed }
+        }
+        await refetch()
+    }
+
     private func refetch() async {
         guard let info, case .ready = state.sidecar.state else { return }
 
         // Resolve a consistent selection BEFORE requesting. When the season changes the episode
-        // is reset to nil; default it to the season's first episode, and make sure the translator
-        // is one that actually exists for that episode (otherwise the sidecar errors).
+        // is reset to nil; default it to the season's first episode. The episode list belongs to
+        // `episodesTranslator`, so that's the translator that can play it.
         var reqSeason: Int? = nil
         var reqEpisode: Int? = nil
         var reqTranslation = translatorID
@@ -599,11 +614,8 @@ struct DetailView: View {
             let sid = seasonID ?? seasons.first?.season
             let eps = seasons.first { $0.season == sid }?.episodes ?? []
             let eid = episodeID ?? eps.first?.episode
-            let avail = eps.first { $0.episode == eid }?.translations ?? []
-            var tid = translatorID
-            if tid == nil || !avail.contains(where: { $0.translator_id == tid }) {
-                tid = avail.first?.translator_id
-            }
+            let tid = translatorID ?? info.episodesTranslator
+                ?? eps.first { $0.episode == eid }?.translations.first?.translator_id
             seasonID = sid; episodeID = eid; translatorID = tid   // keep UI consistent
             reqSeason = sid; reqEpisode = eid; reqTranslation = tid
         }
@@ -626,6 +638,8 @@ struct DetailView: View {
             } else {
                 quality = s.sortedQualities.last
             }
+            // Play is the likely next click: have the link ready for the player.
+            if let q = currentQuality(s), let url = s.url(for: q) { state.warmStream(url) }
         } catch {
             guard streamRequestID == myID else { return }
             streamError = (error as? APIError)?.errorDescription ?? error.localizedDescription

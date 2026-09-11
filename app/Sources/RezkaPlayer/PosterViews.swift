@@ -5,6 +5,7 @@ struct PosterCard: View {
     let item: CatalogueItem
     @EnvironmentObject var state: AppState
     @State private var hovering = false
+    @State private var prefetch: Task<Void, Never>?
 
     /// Resume progress (0…1) for this title, if any — drawn as a bar along the poster bottom.
     private var progress: Double? { state.progress.fraction(forPage: item.url) }
@@ -43,7 +44,16 @@ struct PosterCard: View {
             .shadow(color: .black.opacity(hovering ? 0.35 : 0),
                     radius: hovering ? 12 : 0, y: hovering ? 6 : 0)
             .animation(.easeOut(duration: 0.16), value: hovering)
-            .onHover { hovering = $0 }
+            .onHover { inside in
+                hovering = inside
+                // Resting on a poster loads its title in the background, so the click opens it
+                // at once. The short dwell ignores posters the pointer merely crosses.
+                prefetch?.cancel()
+                prefetch = inside ? Task {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if !Task.isCancelled { state.prefetchTitle(item.url) }
+                } : nil
+            }
 
             Text(item.title)
                 .font(.callout).lineLimit(2)

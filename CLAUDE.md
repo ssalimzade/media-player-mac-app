@@ -56,7 +56,8 @@ Packaged DMG: `./scripts/package.sh` → `build/RezkaPlayer.dmg` (see Packaging 
   `proxy`.** `APIClient` injects `origin`/`cookies` automatically via providers wired in `AppState`.
 - **Vendored code hygiene:** `sidecar/hdrezka/` stays a clean upstream mirror *except* `VENDOR
   PATCH`-marked edits (documented in `sidecar/hdrezka/VENDORED.md` — currently: movie CDN flags, the
-  `favs` token, and a richer `FetchFailed`). Our own features go in `sidecar/browse.py` /
+  `favs` token, a richer `FetchFailed`, and a direct `getStream` for a known translator). Our own
+  features go in `sidecar/browse.py` /
   `server.py`, never inside `hdrezka/`.
 - **Episode navigation:** `PlayerView.jump(to:)` serves previous/next, the episode list, the
   credits countdown and end-of-playback auto-advance (resuming part-watched episodes). Streams walk
@@ -109,7 +110,7 @@ Body includes `origin`; may include `cookies`,
 | `/config`  | `proxy` (`"socks5://.."` or `""`)                           | `{ok, proxy}` — process-wide proxy for all traffic |
 | `/search`  | `query`, `find_all?`, `page?`                               | `{results: [CatalogueItem]}` |
 | `/browse`  | `collection`, `category`, `page?`, `genre?`, `year?`, `sort?` | `{results: [CatalogueItem]}` |
-| `/info`    | `url`                                                       | `TitleInfo` (metadata, translators, episodes?, **similar**) |
+| `/info`    | `url`, `translation?`                                       | `TitleInfo` (metadata, translators, **one translator's** episodes + `episodesTranslator`, **similar**) |
 | `/stream`  | `url`, `translation?`, `season?`, `episode?`               | `{videos: {quality:[urls]}, subtitles, ...}` |
 | `/login`   | `email`, `password` (+ `origin`)                           | `{ok, cookies?, message?}` |
 | `GET /relay` | query: `u`=b64url(cdn), `t`=token, `r`=b64url(origin)     | streams the video (Range-aware) through the configured proxy |
@@ -180,6 +181,33 @@ tolerating ~1.5 s gaps (voice-over across the theme). No ffmpeg/chromaprint to b
   its item is ready (8 s failsafe). The seek is on the `AVPlayer`, so it works over AirPlay — but
   the button and fade are drawn on the Mac only. `autoSkipIntroCredits` off = no
   detection/fetching at all (a plain Skip button still shows where markers exist).
+
+### Speed (pooled connections, caches, prefetch)
+
+HDRezka round trips are the app's latency. What keeps a title page + Play under ~1 s (measured:
+cold title ~0.4–0.5 s, a stream ~0.15 s, anything cached ~1 ms):
+
+- **`net.py`** (installed next to `anubis.install()`) routes every bare `requests.get/post` — the
+  vendored library, `browse.py`, the `/relay` pull — through one shared keep-alive pool (a fresh
+  TLS handshake per call cost ~200 ms), adds a default timeout, and remembers permanent
+  cross-host redirects: `hdrezka.ag` 301s every page to `hdrezka-home.tv`, so later GETs go
+  straight there. Only GET/HEAD are rewritten; `.ag` answers the AJAX POSTs itself.
+- **Title cache** (`server.title_for`): a page is fetched once per 15 min per (url, cookies,
+  proxy) and shared by `/info` and `/stream`; concurrent requests wait for that one fetch. The
+  parsed soup is dropped after loading (it's MBs; the raw page re-parses on demand). Resolved
+  streams are memoised for 30 min (CDN links expire ~20 h out).
+- **One translator's episodes at a time.** Upstream's `episodesInfo` fetched *every* translator's
+  episode list (a `get_cdn_series` call each, ~3 s for 8) on every `/info` and `/stream`. `/info`
+  now lists the `translation` asked for (the app sends its remembered one), else the page's
+  default translator — whose list the page inlines, so it's free — and names it in
+  `episodesTranslator`; `DetailView.switchTranslator` re-asks when another is picked. `/stream`
+  without a translation uses the page default (upstream's priority pick only if that fails).
+- **The app prefetches** (`AppState.prefetchTitle`): a poster the pointer rests on (250 ms), the
+  top Continue Watching titles once the sidecar is up (plus the stream their page opens on), and
+  the player's next episode (`PlayerView.prefetchNextStream`).
+- **Don't publish per tick.** Every store re-publishes through `AppState`, so any store change
+  re-renders the whole app: download progress is throttled to 2/s (and not written to disk per
+  tick), and `ProgressStore` keeps indexes rather than scanning ≤2000 entries per poster.
 
 ## Anubis anti-bot gateway
 

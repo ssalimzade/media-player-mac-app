@@ -169,10 +169,11 @@ final class AppState: ObservableObject {
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        // Push the proxy config to the sidecar whenever it (re)starts and becomes ready.
+        // Push the proxy config to the sidecar whenever it (re)starts and becomes ready, then
+        // preload what Continue Watching leads with.
         sidecar.$state
             .sink { [weak self] state in
-                if case .ready = state { self?.pushProxyConfig() }
+                if case .ready = state { self?.pushProxyConfig(warmAfter: true) }
             }
             .store(in: &cancellables)
 
@@ -279,9 +280,66 @@ final class AppState: ObservableObject {
     }
 
     /// Send the current proxy setting to the sidecar (applies to all its traffic + the relay).
-    func pushProxyConfig() {
+    /// `warmAfter` (a freshly started sidecar) then preloads the top Continue Watching titles.
+    func pushProxyConfig(warmAfter: Bool = false) {
         let proxy = proxyURLString.trimmingCharacters(in: .whitespaces)
-        Task { try? await api.configure(proxy: proxy) }
+        Task {
+            try? await api.configure(proxy: proxy)
+            if warmAfter { warmContinueWatching() }
+        }
+    }
+
+    // MARK: Prefetch
+
+    /// Titles recently preloaded (page URL → when), so each is asked for at most once per
+    /// `warmInterval`; the sidecar keeps a loaded title for 15 minutes.
+    private var warmed: [String: Date] = [:]
+    private static let warmInterval: TimeInterval = 10 * 60
+
+    /// Have the sidecar load a title ahead of time — and, when you're part-way through it, the
+    /// stream its page will open on — so opening it is instant. Called on poster hover and, for
+    /// Continue Watching, at launch. Fire-and-forget: a failure just means it loads on open.
+    func prefetchTitle(_ url: String) {
+        guard case .ready = sidecar.state, url.hasPrefix("http") else { return }
+        let now = Date()
+        if let at = warmed[url], now.timeIntervalSince(at) < Self.warmInterval { return }
+        warmed[url] = now
+        // The same translator and episode DetailView will ask for (see loadInfo/resumeEpisode).
+        let last = progress.latestForPage(url)
+        let translation = prefs.translator(for: url) ?? last?.translatorId
+        let api = api
+        Task {
+            _ = try? await api.info(url: url, translation: translation)
+            if let last, !last.isComplete, let translation {
+                _ = try? await api.stream(url: url, translation: translation,
+                                          season: last.season, episode: last.episode)
+            }
+        }
+    }
+
+    /// CDN links recently warmed (link → when); see `warmStream`.
+    private var warmedStreams: [String: Date] = [:]
+
+    /// Get the link the player is about to open ready: the sidecar resolves its redirect to a
+    /// storage node and opens a connection there, taking a second or more off the player's
+    /// start. Called when a title page settles on a stream and for the player's next episode.
+    func warmStream(_ cdnURL: String) {
+        guard case .ready = sidecar.state else { return }
+        let now = Date()
+        if let at = warmedStreams[cdnURL], now.timeIntervalSince(at) < 60 { return }
+        warmedStreams[cdnURL] = now
+        let api = api
+        Task { try? await api.warm(url: cdnURL) }
+    }
+
+    /// Preload the first few Continue Watching titles.
+    private func warmContinueWatching() {
+        var pages: [String] = []
+        for e in progress.recent() where !pages.contains(e.pageURL) {
+            pages.append(e.pageURL)
+            if pages.count == 4 { break }
+        }
+        pages.forEach(prefetchTitle)
     }
 
     /// For a remote CDN URL, return the URL playback/downloads should actually hit:

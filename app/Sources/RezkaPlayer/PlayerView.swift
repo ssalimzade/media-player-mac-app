@@ -135,6 +135,21 @@ struct PlayerView: View {
     private func episodeChanged() {
         refreshOverlay()
         requestSkipDetection()
+        prefetchNextStream()
+    }
+
+    /// Resolve the next episode's stream now, so Next, auto-advance and the credits skip start it
+    /// without waiting on HDRezka (the sidecar keeps the answer for a while).
+    private func prefetchNextStream() {
+        guard !target.isLocal, let page = target.pageURL, let next = neighbour(+1) else { return }
+        let api = state.api, translator = curTranslatorId, quality = curQuality
+        Task {
+            guard let s = try? await api.stream(url: page, translation: translator,
+                                                season: next.season, episode: next.episode)
+            else { return }
+            let q = quality.flatMap { s.videos[$0] != nil ? $0 : nil } ?? s.sortedQualities.last
+            if let q, let url = s.url(for: q) { state.warmStream(url) }
+        }
     }
 
     // MARK: Item construction

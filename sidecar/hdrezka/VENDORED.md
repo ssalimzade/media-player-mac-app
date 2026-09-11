@@ -24,6 +24,12 @@ Search for `VENDOR PATCH` in this folder. Current patches:
   `success:true, url:false`. `makeRequest` also now raises a descriptive `FetchFailed` message
   (geo-restriction / login / premium hints) instead of a bare "Failed to fetch stream!".
 - **errors.py `FetchFailed`** — accepts an optional message (for the diagnostics above).
+- **api.py `getStream` (series)** — when given a numeric translator the title offers, go straight
+  to the `get_stream` CDN call instead of first validating it against `episodesInfo`, which fetches
+  *every* translator's episode list (one `get_cdn_series` POST each — 8 for a long-running series,
+  ~3 s) on every stream request. The CDN call itself reports a translator that lacks the episode.
+  `server.py` also never lets a series request reach the translator-priority path unless the page's
+  default translator fails, so `seriesInfo` is normally never fetched.
 - **api.py `translators` auto-detect** — the no-`#translators-list` fallback (`getTranslationID`)
   blindly split the whole page on the `sof.tv.initCDNMoviesEvents`/`initCDNSeriesEvents` marker and
   `int()`'d the result. On titles with **no player at all** (e.g. an upcoming/not-yet-released film

@@ -27,9 +27,12 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import threading
+import time
 import traceback
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -43,10 +46,15 @@ import anubis
 # any hdrezka/browse request is issued. See anubis.py.
 anubis.install()
 
+import net
+# Pool connections and skip the hdrezka.ag -> hdrezka-home.tv redirect on repeat requests
+# (see net.py). Also applies to every library/browse call without editing them.
+net.install()
+
 from hdrezka.api import HdRezkaApi
 from hdrezka.search import HdRezkaSearch
 from hdrezka.types import TVSeries, Movie, default_headers
-from hdrezka.errors import LoginFailed
+from hdrezka.errors import LoginFailed, FetchFailed
 from browse import Browse, CATEGORIES, COLLECTIONS, GENRES, SORTS, parse_similar
 
 __version__ = "0.2.0"
@@ -126,6 +134,169 @@ def make_api(body):
     )
 
 
+# ---------- title cache ----------
+#
+# One title page serves many requests: /info, then /stream for the chosen episode, then every
+# episode switch — plus the app's hover/launch prefetch and SkipDetector's neighbour lookups.
+# Each used to re-download the page, and a series' /info or /stream also made one
+# get_cdn_series call per translator (8 for The Sopranos, ~3 s) just to list episodes. Now a
+# page is fetched once and kept for TITLE_TTL, episode lists are fetched per translator only
+# when asked for (the default translator's list is inlined in the page itself: free), and
+# resolved streams are kept for STREAM_TTL.
+
+TITLE_TTL = 15 * 60
+STREAM_TTL = 30 * 60        # CDN links carry an expiry ~20 h out; this stays well inside it
+TITLE_CACHE_MAX = 32
+
+_SERIES_INIT = re.compile(r"initCDNSeriesEvents\(\s*\d+\s*,\s*(\d+)")
+
+
+class _Title:
+    def __init__(self, api):
+        self.api = api
+        self.created = self.used = time.monotonic()
+        self.page_lock = threading.Lock()   # one page fetch, however many requests race for it
+        self.lock = threading.Lock()        # guards the memo tables below
+        self.loaded = False
+        self.base = None                    # /info payload minus episodes
+        self.default = None                 # translator whose episode list the page inlines
+        self.episodes = {}                  # translator id -> (at, Future[(seasons, episodes)])
+        self.streams = {}                   # "[season, episode, translation]" -> (at, Future)
+
+
+_titles = {}
+_titles_lock = threading.Lock()
+
+
+def _memo(t, table, key, ttl, fn):
+    """Return fn() through `table`, computing it once per `ttl` even when several requests ask
+    at the same moment (they wait for the first). Failures aren't kept."""
+    now = time.monotonic()
+    owner = False
+    with t.lock:
+        hit = table.get(key)
+        if hit is None or now - hit[0] > ttl:
+            hit = (now, Future())
+            table[key] = hit
+            owner = True
+    fut = hit[1]
+    if owner:
+        try:
+            fut.set_result(fn())
+        except BaseException as e:
+            with t.lock:
+                if table.get(key) is hit:
+                    del table[key]
+            fut.set_exception(e)
+    return fut.result()
+
+
+def title_for(body):
+    """The cached, loaded title for this request's page (+ cookies/proxy, which change what
+    HDRezka serves). Raises what the page fetch raised (HTTP / login / captcha)."""
+    origin = body["origin"]
+    url = abs_url(origin, body.get("url") or origin)
+    key = json.dumps([url.split(".html")[0], body.get("cookies") or {}, proxy_for(body),
+                      body.get("headers") or {}], sort_keys=True)
+    now = time.monotonic()
+    with _titles_lock:
+        t = _titles.get(key)
+        if t is None or now - t.created > TITLE_TTL:
+            t = _Title(make_api(body))
+            _titles[key] = t
+            if len(_titles) > TITLE_CACHE_MAX:
+                for k, _ in sorted(_titles.items(), key=lambda kv: kv[1].used)[:len(_titles) - TITLE_CACHE_MAX]:
+                    del _titles[k]
+        t.used = now
+    with t.page_lock:
+        if not t.loaded:
+            try:
+                _load(t)
+            except Exception:
+                with _titles_lock:
+                    if _titles.get(key) is t:
+                        del _titles[key]
+                raise
+    return t
+
+
+def _load(t):
+    api = t.api
+    api.soup                                   # fetch + parse; raises HTTP/login/captcha errors
+    t.default = default_translator(api)
+    t.base = _base_info(api)
+    if api.type == TVSeries and t.default is not None:
+        # The page inlines the default translator's episode list; take it while it's parsed.
+        _memo(t, t.episodes, t.default, TITLE_TTL, lambda: _fetch_episodes(api, t.default, t.default))
+    for name in ("id", "favs", "name", "type", "translators"):   # what getStream reads later
+        _safe(lambda: getattr(api, name))
+    # A parsed page is several MB; the raw page stays cached and re-parses if anything asks.
+    api.__dict__.pop("soup", None)
+    t.loaded = True
+
+
+def default_translator(api):
+    """The translator a series page opens with — the one its inlined episode list belongs to."""
+    m = _SERIES_INIT.search(api.page.text)
+    if m:
+        return int(m.group(1))
+    return next(iter(_safe(lambda: api.translators) or {}), None)
+
+
+def _fetch_episodes(api, tid, default):
+    """(seasons, episodes) for one translator, in the vendored `getEpisodes` shape."""
+    if tid == default:
+        s = api.soup
+        episodes_html = str(s.find(id="simple-episodes-tabs") or "")
+        if "b-simple_episode__item" in episodes_html:
+            return api.getEpisodes(str(s.find(id="simple-seasons-tabs") or ""), episodes_html)
+    r = requests.post(f"{api.origin}/ajax/get_cdn_series/",
+                      data={"id": api.id, "translator_id": tid, "action": "get_episodes"},
+                      headers=api.HEADERS, proxies=api.proxy, cookies=api.cookies)
+    js = r.json()
+    if not js.get("success"):
+        raise FetchFailed(js.get("message") or "HDRezka didn't return the episode list.")
+    return api.getEpisodes(js["seasons"], js["episodes"])
+
+
+def series_episodes(t, wanted):
+    """(translator, [{season, season_text, episodes: [{episode, episode_text, translations}]}])
+    for `wanted` when it's one of the title's translators, else for the page's default — which
+    is also the fallback when fetching `wanted`'s list fails. Each episode's `translations`
+    names just that translator: the list is *its* episodes."""
+    api = t.api
+    known = _safe(lambda: api.translators) or {}
+    tid = t.default
+    try:
+        if wanted not in (None, "") and int(wanted) in known:
+            tid = int(wanted)
+    except (TypeError, ValueError):
+        pass
+    try:
+        seasons, episodes = _memo(t, t.episodes, tid, TITLE_TTL,
+                                  lambda: _fetch_episodes(api, tid, t.default))
+    except Exception:
+        if tid == t.default:
+            return tid, []
+        return series_episodes(t, None)
+
+    meta = known.get(tid) or {}
+    translations = [] if tid is None else [
+        {"translator_id": tid, "translator_name": meta.get("name"), "premium": bool(meta.get("premium"))}]
+    out = []
+    for season in list(seasons) + [s for s in episodes if s not in seasons]:
+        eps = episodes.get(season) or {}
+        if not eps:
+            continue
+        out.append({
+            "season": int(season),
+            "season_text": seasons.get(season) or f"Сезон {season}",
+            "episodes": [{"episode": int(e), "episode_text": text, "translations": translations}
+                         for e, text in eps.items()],
+        })
+    return tid, out
+
+
 # ---------- endpoint handlers ----------
 
 def h_health(_body):
@@ -187,10 +358,19 @@ def h_browse(body):
 
 
 def h_info(body):
-    api = make_api(body)
-    if not api.ok:
-        raise api.exception or RuntimeError("Failed to load page")
+    """Title metadata. For a series, `episodes` lists the episodes of one translator — the
+    body's `translation` if given (the app sends the one it will play), else the page's default
+    — named in `episodesTranslator`. Switching translator = asking again with it (cheap)."""
+    t = title_for(body)
+    data = dict(t.base)
+    if data["isSeries"]:
+        tid, seasons = series_episodes(t, body.get("translation"))
+        data["episodesTranslator"] = tid
+        data["episodes"] = seasons
+    return data
 
+
+def _base_info(api):
     data = {
         "id": api.id,
         "url": api.url,
@@ -217,22 +397,36 @@ def h_info(body):
     for it in similar:
         it["url"] = abs_url(api.origin, it.get("url"))
     data["similar"] = similar
-    if api.type == TVSeries:
-        # episodesInfo: [{season, season_text, episodes:[{episode, episode_text, translations:[...]}]}]
-        data["episodes"] = _safe(lambda: api.episodesInfo) or []
     return data
 
 
 def h_stream(body):
-    api = make_api(body)
-    if not api.ok:
-        raise api.exception or RuntimeError("Failed to load page")
+    t = title_for(body)
+    api = t.api
     season = body.get("season")
     episode = body.get("episode")
-    translation = body.get("translation")
-    stream = api.getStream(
-        season=season, episode=episode, translation=translation,
-    )
+    asked = body.get("translation")
+    translation = asked
+    series = api.type == TVSeries and bool(season) and bool(episode)
+    if series and asked in (None, ""):
+        # The page's own pick. Upstream would instead fetch every translator's episode list
+        # to choose by priority — only done now if the default doesn't carry this episode.
+        translation = t.default
+
+    def fetch():
+        try:
+            stream = api.getStream(season=season, episode=episode, translation=translation)
+        except (FetchFailed, ValueError):
+            if not (series and asked in (None, "") and translation is not None):
+                raise
+            stream = api.getStream(season=season, episode=episode)
+        return _stream_payload(stream)
+
+    key = json.dumps([str(season), str(episode), str(translation)])
+    return _memo(t, t.streams, key, STREAM_TTL, fetch)
+
+
+def _stream_payload(stream):
     subs = []
     try:
         for code, val in stream.subtitles.subtitles.items():
@@ -275,12 +469,70 @@ def _safe(fn, default=None):
         return default
 
 
+# ---------- CDN links: redirect memo + warm-up ----------
+#
+# A CDN link (stream.voidboost.*) answers every request with a 302 to a storage node. The player
+# makes several requests to start (and one per seek), each of which paid that hop plus a fresh
+# handshake — ~1.7 s for the first, ~0.5 s after. The relay now remembers where each link lands
+# and goes straight there; `/warm` does the first resolve before the player even asks.
+
+RESOLVED_TTL = 3 * 3600     # the node URL is the same signed path on another host
+_resolved = {}              # cdn url -> (node url, at)
+_resolved_lock = threading.Lock()
+
+
+def relay_fetch(target, headers):
+    """Streamed GET of a CDN link, sent straight to the node it redirects to when that's known
+    (falling back to the link itself if the node refuses)."""
+    with _resolved_lock:
+        hit = _resolved.get(target)
+    if hit and time.monotonic() - hit[1] < RESOLVED_TTL:
+        try:
+            r = requests.get(hit[0], headers=headers, proxies=PROXY, stream=True,
+                             allow_redirects=True, timeout=(15, 60))
+            if r.status_code < 400:
+                return r
+            r.close()
+        except requests.RequestException:
+            pass
+        with _resolved_lock:
+            _resolved.pop(target, None)
+    r = requests.get(target, headers=headers, proxies=PROXY, stream=True,
+                     allow_redirects=True, timeout=(15, 60))
+    if r.history and r.status_code < 400 and r.url != target:
+        with _resolved_lock:
+            _resolved[target] = (r.url, time.monotonic())
+            if len(_resolved) > 512:
+                for k, _ in sorted(_resolved.items(), key=lambda kv: kv[1][1])[:128]:
+                    del _resolved[k]
+    return r
+
+
+def h_warm(body):
+    """Get a CDN link ready before the player opens it: resolve its redirect and leave a warm
+    pooled connection to the node. Body: {url} (the CDN link). Returns at once."""
+    target = body["url"]
+    headers = {**RELAY_HEADERS, "Range": "bytes=0-0"}
+    if body.get("origin"):
+        headers["Referer"] = body["origin"]
+
+    def go():
+        try:
+            relay_fetch(target, headers).content   # 1 byte; reading it pools the connection
+        except Exception:
+            pass
+
+    threading.Thread(target=go, daemon=True).start()
+    return {"ok": True}
+
+
 ROUTES = {
     "/config": h_config,
     "/search": h_search,
     "/browse": h_browse,
     "/info": h_info,
     "/stream": h_stream,
+    "/warm": h_warm,
     "/login": h_login,
 }
 
@@ -438,8 +690,7 @@ class Handler(BaseHTTPRequestHandler):
                 headers[h] = v
 
         try:
-            upstream = requests.get(target, headers=headers, proxies=PROXY,
-                                    stream=True, allow_redirects=True, timeout=(15, 60))
+            upstream = relay_fetch(target, headers)
         except Exception as e:
             return self._send(502, {"error": f"relay failed: {e}"}, with_body=with_body)
 
