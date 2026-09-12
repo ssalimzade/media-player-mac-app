@@ -60,7 +60,8 @@ Packaged DMG: `./scripts/package.sh` → `build/RezkaPlayer.dmg` (see Packaging 
   features go in `sidecar/browse.py` /
   `server.py`, never inside `hdrezka/`.
 - **Episode navigation:** `PlayerView.jump(to:)` serves previous/next, the episode list, the
-  credits countdown and end-of-playback auto-advance (resuming part-watched episodes). Streams walk
+  credits countdown and end-of-playback auto-advance (resuming part-watched episodes; the one being
+  left is saved at its exact position first). Streams walk
   the whole series across seasons (`PlayerTarget.allEpisodes`, built by `DetailView`); local
   playback walks completed downloads (`DownloadManager.downloadedEpisodes(ofPage:)`, numeric
   season/episode order). A Next button also sits in the window toolbar.
@@ -162,6 +163,12 @@ AirPlay screen while the Mac reports "playing on TV":
    remote's "Play on Mac / Play on TV" toggles `allowsExternalPlayback`, and each new player
    visit turns it back on.
 
+5. **Don't take the receiver's word for the end.** A Fire TV posts `AVPlayerItemDidPlayToEndTime`
+   when it's merely *paused*, which marked the episode finished (and scrobbled it) and moved on —
+   sometimes several episodes in a row. `PlayerView.handleEnd` only acts if the item was last seen
+   playing within 15 s of its end (`Playhead`); `ProgressStore.load` un-finishes entries marked
+   finished before 75% of the way in (their position was kept, so they resume again).
+
 Verified against a Samsung Tizen receiver, which fetches the URL with a `SMART-TV; LINUX; Tizen`
 user-agent. Note this is *AirPlay*, not screen mirroring — mirroring never flips
 `isExternalPlaybackActive`, so none of the above applies to it.
@@ -172,8 +179,11 @@ HDRezka publishes no intro/credits markers, so `SkipDetector` (an `actor`) finds
 Plex/Jellyfin do: the opening theme is the same recording in every episode, so the longest stretch
 of audio two neighbouring episodes share in their first quarter (≤7 min) is the intro, and in their
 last fifth (≤4 min) the credits. Fingerprints are a Philips/Haitsma–Kalker sub-band hash built with
-Accelerate (~8 frames/s, 32 bits each); matching is XOR+popcount over every time offset, a run
-tolerating ~1.5 s gaps (voice-over across the theme). No ffmpeg/chromaprint to bundle.
+Accelerate (~8 frames/s, 32 bits each); matching is XOR+popcount over every time offset. Hits
+≤1.5 s apart make a piece; pieces ≥1 s join across gaps ≤8 s while the run stays mostly matches
+(a voice-over line or a quiet beat inside the theme — The Sopranos' has one ~40 s in, which used to
+leave only its second half). `SkipStore.Markers.version` goes up with the matcher: older markers
+are dropped on load and found again from the cached fingerprints. No ffmpeg/chromaprint to bundle.
 
 - **`AVAssetReader` refuses non-local URLs** (`-11838`). For streams, `Media.sparse` fetches the
   moov (head, else tail) into a same-size **sparse** temp file, then uses the sample table

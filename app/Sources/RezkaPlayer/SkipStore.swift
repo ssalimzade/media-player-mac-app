@@ -17,6 +17,10 @@ final class SkipStore: ObservableObject {
         var introChecked: Bool
         var creditsChecked: Bool
         var updatedAt: Date
+        /// The detector revision that found these. Older markers are dropped on load and found
+        /// again — from the cached fingerprints, so that downloads nothing.
+        var version: Int?
+        static let currentVersion = 2
 
         init() {
             introChecked = false
@@ -41,6 +45,7 @@ final class SkipStore: ObservableObject {
         var m = items[key] ?? Markers()
         change(&m)
         m.updatedAt = Date()
+        m.version = Markers.currentVersion
         items[key] = m
         save()
     }
@@ -63,7 +68,8 @@ final class SkipStore: ObservableObject {
     private func load() {
         guard let data = try? Data(contentsOf: file),
               let decoded = try? JSONDecoder().decode([String: Markers].self, from: data) else { return }
-        items = decoded
+        items = decoded.filter { $0.value.version == Markers.currentVersion }
+        if items.count != decoded.count { save() }
     }
 
     private func save() {

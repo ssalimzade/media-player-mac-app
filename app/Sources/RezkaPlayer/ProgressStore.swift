@@ -179,8 +179,20 @@ final class ProgressStore: ObservableObject {
     private func load() {
         guard let data = try? Data(contentsOf: file),
               let decoded = try? JSONDecoder().decode([Entry].self, from: data) else { return }
-        items = decoded
+        // A pause on some AirPlay receivers used to count as the end of the episode (see
+        // PlayerView.handleEnd), marking episodes finished minutes in and losing their resume
+        // point. A real end — or a credits skip, which only happens in the last fifth — is never
+        // that early, so those go back to resumable (their position was kept).
+        var repaired = false
+        items = decoded.map { e in
+            guard e.finished, e.duration > 0, e.position < e.duration * 0.75 else { return e }
+            var e = e
+            e.finished = false
+            repaired = true
+            return e
+        }
         reindex()   // observers don't fire during init
+        if repaired { save() }
     }
 
     private func save() {

@@ -2,6 +2,9 @@ import SwiftUI
 import AVKit
 import Combine
 
+/// Where the player was last seen playing. A class, so the per-tick write doesn't re-render the view.
+final class Playhead { var lastPlaying: Double = 0 }
+
 struct PlayerView: View {
     let target: PlayerTarget
     @EnvironmentObject var state: AppState
@@ -47,6 +50,8 @@ struct PlayerView: View {
     @State private var creditsDone = false
     /// The credits countdown and the real end of the item can both fire; only act once.
     @State private var endHandled = false
+    /// Where the item was last seen playing — tells a real end from a receiver that only says so.
+    @State private var playhead = Playhead()
     /// After a credits skip dipped to black: brings picture and sound back once the next
     /// episode's item is ready.
     @State private var pendingReveal: (() -> Void)?
@@ -237,7 +242,7 @@ struct PlayerView: View {
         curResumeAt = resumeAt
         didSeekResume = false
         introSkipAt = nil; creditsSkipAt = nil
-        introDone = false; creditsDone = false; endHandled = false
+        introDone = false; creditsDone = false; endHandled = false; playhead.lastPlaying = 0
         setSkipPrompt(nil)
         lastRecorded = .distantPast
 
@@ -342,6 +347,7 @@ struct PlayerView: View {
         guard duration.isFinite, duration > 0 else { return }   // skip until duration known
         let position = time.seconds
         guard position.isFinite, position >= 0 else { return }
+        if (player?.rate ?? 0) != 0 { playhead.lastPlaying = position }
 
         checkSkips(position: position, duration: duration)
         if Date().timeIntervalSince(lastRecorded) >= 5 {
@@ -531,6 +537,11 @@ struct PlayerView: View {
     // MARK: End-of-playback + autoplay
 
     private func handleEnd() {
+        // An AirPlay receiver can report the end when it's merely paused (a Fire TV does, and
+        // this used to mark the episode watched and move on). Believe it only if playback had
+        // actually got there.
+        if let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
+           d - playhead.lastPlaying > 15 { return }
         guard !endHandled else { return }
         endHandled = true
         setSkipPrompt(nil)
@@ -610,6 +621,12 @@ struct PlayerView: View {
     /// Switch to another episode of the series, resuming it if it was part-watched.
     private func jump(to ref: EpisodeRef) {
         guard !advancing, ref != currentRef else { return }
+        // Save exactly where the outgoing episode stopped (the periodic save is every 5 s), so
+        // coming back to it picks up there.
+        if let p = player, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 {
+            let t = p.currentTime().seconds
+            if t.isFinite, t > 0 { recordProgress(position: min(t, d), duration: d) }
+        }
         let resume = savedResume(for: ref)
         if target.isLocal {
             guard let item = downloadedEpisodes.first(where: { $0.ref == ref })?.item else { return }

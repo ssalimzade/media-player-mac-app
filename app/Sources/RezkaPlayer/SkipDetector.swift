@@ -294,10 +294,13 @@ actor SkipDetector {
     struct Shared { let a: ClosedRange<Int>; let b: ClosedRange<Int> }
 
     /// Longest stretch of audio the two fingerprints share, at any time offset. A frame pair
-    /// matches when ≤10 of 32 bits differ (unrelated audio: ~16); a run tolerates ~1.5 s gaps
-    /// (a voice-over line across the theme) but must be at least half matches.
+    /// matches when ≤10 of 32 bits differ (unrelated audio: ~16). Hits ≤1.5 s apart form a
+    /// piece; solid pieces (≥1 s, at least half matches) ≤8 s apart join into one run, so a
+    /// voice-over line or a quiet beat across the theme doesn't cut it in two — The Sopranos'
+    /// has one ~40 s in, which used to leave just its second half. Stray chance hits never make
+    /// a solid piece, so a run can't creep past the real end.
     static func longestShared(_ a: [UInt32], _ b: [UInt32], minFrames: Int, maxFrames: Int) -> Shared? {
-        let maxBits = 10, maxGap = 12
+        let maxBits = 10, maxGap = 12, minPiece = 8, joinGap = 64
         var best: Shared?
         var bestLen = 0
         a.withUnsafeBufferPointer { ap in
@@ -305,7 +308,16 @@ actor SkipDetector {
                 for shift in -(b.count - 1)..<a.count {           // a[i] ↔ b[i - shift]
                     let lo = max(0, shift), hi = min(a.count, b.count + shift)
                     guard hi - lo >= minFrames else { continue }
-                    var start = -1, last = -1, hits = 0
+                    var start = -1, last = -1, hits = 0              // the piece being built
+                    var runStart = -1, runLast = -1, runHits = 0     // the run of joined pieces
+                    func closeRun() {
+                        let len = runLast - runStart + 1
+                        if runStart >= 0, len >= minFrames, len <= maxFrames, runHits * 2 >= len, len > bestLen {
+                            bestLen = len
+                            best = Shared(a: runStart...runLast, b: (runStart - shift)...(runLast - shift))
+                        }
+                        runStart = -1
+                    }
                     var i = lo
                     while i <= hi {
                         let isHit: Bool
@@ -315,13 +327,21 @@ actor SkipDetector {
                         } else {
                             isHit = false
                         }
-                        // A run ends at the end of the overlap, or once the gap since its last
-                        // hit grows past `maxGap`.
+                        // A piece ends at the end of the overlap, or once the gap since its last
+                        // hit grows past `maxGap`. Solid ones join the run, or start a new one.
                         if start >= 0 && (i == hi || i - last > maxGap) {
                             let len = last - start + 1
-                            if len >= minFrames, len <= maxFrames, hits * 2 >= len, len > bestLen {
-                                bestLen = len
-                                best = Shared(a: start...last, b: (start - shift)...(last - shift))
+                            if len >= minPiece, hits * 2 >= len {
+                                // Join only while the run still holds up (mostly matches, not too
+                                // long); otherwise it ends as it was and this piece starts the next.
+                                let joined = last - runStart + 1
+                                if runStart >= 0, start - runLast <= joinGap,
+                                   joined <= maxFrames, (runHits + hits) * 2 >= joined {
+                                    runLast = last; runHits += hits
+                                } else {
+                                    closeRun()
+                                    runStart = start; runLast = last; runHits = hits
+                                }
                             }
                             start = -1
                         }
@@ -332,6 +352,7 @@ actor SkipDetector {
                         }
                         i += 1
                     }
+                    closeRun()
                 }
             }
         }
