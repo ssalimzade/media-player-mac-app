@@ -28,6 +28,8 @@ struct PlayerView: View {
     @State private var curTranslatorId: Int?
     @State private var curQuality: String?
     @State private var curResumeAt: Double = 0
+    /// The playing episode's stream (every resolution), for the quality pickers. Streams only.
+    @State private var curStream: StreamResponse?
     @State private var isExternal = false
     /// Which download is playing, for local next-episode lookups (nil while streaming).
     @State private var curDownloadID: UUID?
@@ -95,15 +97,19 @@ struct PlayerView: View {
         curTitle = target.title
         wireOverlay()
         attachRemote()
+        loadStreamOptions()
 
-        guard let item = makeItem(cdnURLString: target.urlString, isLocal: target.isLocal) else { return }
-        let p = AVPlayer(playerItem: item)
-        // Remote streams play through this Mac's LAN-IP relay (see makeItem) — a LAN-routable URL an
-        // AirPlay receiver can also fetch. Because it isn't a 127.0.0.1 loopback (which a TV can
-        // never reach, so AVFoundation suppresses the video route), the item stays AirPlay-eligible
-        // and the player offers a real *video* route: selecting the TV plays it there, pulling from
+        // The app's one shared player (AppState.player), so a TV picked in its AirPlay menu stays
+        // picked across titles and visits. Remote streams play through this Mac's LAN-IP relay (see
+        // makeItem) — a LAN-routable URL an AirPlay receiver can also fetch. Because it isn't a
+        // 127.0.0.1 loopback (which a TV can never reach, so AVFoundation suppresses the video
+        // route), the item stays AirPlay-eligible: selecting the TV plays it there, pulling from
         // this Mac. No source swap needed — the same URL works locally and on the receiver.
-        p.allowsExternalPlayback = true
+        let p = state.player
+        p.allowsExternalPlayback = true          // undo a phone "Play on Mac" from an earlier visit
+        isExternal = p.isExternalPlaybackActive  // already on the TV: a download goes via /media
+        guard let item = makeItem(cdnURLString: target.urlString, isLocal: target.isLocal) else { return }
+        p.replaceCurrentItem(with: item)
         player = p
         attachObservers(to: p, item: item)
         p.play()
@@ -134,6 +140,48 @@ struct PlayerView: View {
         overlay.onSkipNow = { skipNow() }
         overlay.onCancelSkip = { cancelSkip() }
         overlay.onToggleAutoSkip = { state.autoSkip = $0 }
+        overlay.onSelectQuality = { switchQuality(to: $0) }
+    }
+
+    /// Fetch the pushed episode's stream (all resolutions) for the quality pickers. The title page
+    /// asked the sidecar for exactly this a moment ago, so it comes from its cache.
+    private func loadStreamOptions() {
+        guard !target.isLocal, let page = target.pageURL else { return }
+        let api = state.api, translator = curTranslatorId, s = curSeason, e = curEpisode
+        Task {
+            guard let stream = try? await api.stream(url: page, translation: translator,
+                                                     season: s, episode: e),
+                  curSeason == s, curEpisode == e, curStream == nil else { return }
+            curStream = stream
+            refreshOverlay()
+        }
+    }
+
+    /// Swap to another resolution of the same stream, carrying on from the same moment (paused
+    /// stays paused). It also becomes the preferred quality, so the next episodes open in it.
+    private func switchQuality(to q: String) {
+        guard !target.isLocal, q != curQuality, let cdn = curStream?.url(for: q), let p = player,
+              let item = makeItem(cdnURLString: cdn, isLocal: false) else { return }
+        let at = p.currentTime()
+        let wasPlaying = p.rate != 0
+        curQuality = q
+        state.preferredQuality = q
+        p.pause()                           // don't run the new item from 0 while it loads
+        didSeekResume = true                // not the saved resume point: right where we are
+        observeEnd(of: item)
+        observeReady(of: item)
+        p.replaceCurrentItem(with: item)
+        swapReadyObserver = item.publisher(for: \.status)
+            .receive(on: DispatchQueue.main)
+            .sink { status in
+                guard status == .readyToPlay else { return }
+                p.seek(to: at, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                    if wasPlaying { DispatchQueue.main.async { p.play() } }
+                }
+                self.swapReadyObserver?.cancel(); self.swapReadyObserver = nil
+            }
+        refreshOverlay()
+        overlay.showToast(String(localized: "Quality: \(q)"))
     }
 
     /// The playing episode changed (or playback just started): refresh the on-video controls and
@@ -627,6 +675,7 @@ struct PlayerView: View {
                 curSeason = ref.season
                 curEpisode = ref.episode
                 curQuality = q
+                curStream = s
                 if let t = s.translatorId { curTranslatorId = t }
                 curTitle = "\(target.seriesName ?? target.title) · \(ref.tag)"
                 load(item, into: p, resumeAt: resumeAt)
@@ -658,7 +707,9 @@ struct PlayerView: View {
             canPrevious: neighbour(-1) != nil, canNext: neighbour(+1) != nil,
             skip: overlay.skip.map { $0.kind == .intro ? "intro" : "credits" },
             skipProgress: overlay.skip?.progress,
-            autoSkip: state.autoSkip, airplay: isExternal, fullScreen: overlay.isFullScreen)
+            autoSkip: state.autoSkip, airplay: isExternal,
+            airplayOff: !(player?.allowsExternalPlayback ?? true), fullScreen: overlay.isFullScreen,
+            quality: curQuality, qualities: overlay.qualities)
     }
 
     private func remoteCommand(_ command: PhoneRemote.Command) {
@@ -674,6 +725,10 @@ struct PlayerView: View {
         case .volume(let v): p.volume = min(1, max(0, v))
         case .autoSkip(let on): state.autoSkip = on
         case .fullScreen: overlay.toggleFullScreen()
+        case .quality(let q): switchQuality(to: q)
+        case .airPlay(let on):
+            // Off moves playback back to the Mac; on returns it to the AirPlay TV picked earlier.
+            p.allowsExternalPlayback = on
         case .close:
             // Leave AVKit's full screen first; popping the view mid-transition strands its window.
             if overlay.isFullScreen {
@@ -700,6 +755,8 @@ struct PlayerView: View {
         overlay.episodeLabel = currentRef?.tag
         overlay.canPrevious = neighbour(-1) != nil
         overlay.canNext = neighbour(+1) != nil
+        overlay.qualities = (curStream?.sortedQualities ?? []).reversed()
+        overlay.quality = curQuality
 
         let page = target.pageURL ?? target.urlString
         let cur = currentRef

@@ -21,6 +21,9 @@ final class PlayerOverlayModel: ObservableObject {
     @Published var sections: [EpisodeMenuSection] = []
     @Published var autoSkip = true
     @Published var skip: SkipPrompt?
+    /// Resolutions the playing stream offers, best first, and the one playing (streams only).
+    @Published var qualities: [String] = []
+    @Published var quality: String?
     @Published private(set) var toast: String?
     @Published private(set) var controlsVisible = false
 
@@ -30,6 +33,7 @@ final class PlayerOverlayModel: ObservableObject {
     var onSkipNow: () -> Void = {}
     var onCancelSkip: () -> Void = {}
     var onToggleAutoSkip: (Bool) -> Void = { _ in }
+    var onSelectQuality: (String) -> Void = { _ in }
 
     /// Whether AVKit's player is in full screen (kept current by `AVPlayerViewContainer`).
     var isFullScreen = false
@@ -77,7 +81,7 @@ final class PlayerOverlayModel: ObservableObject {
     func detach() {
         onPrevious = {}; onNext = {}; onSelect = { _ in }
         onSkipNow = {}; onCancelSkip = {}; onToggleAutoSkip = { _ in }
-        toggleFullScreen = {}
+        onSelectQuality = { _ in }; toggleFullScreen = {}
         hideControls?.cancel(); hideToast?.cancel()
     }
 }
@@ -189,49 +193,55 @@ final class FadeView: NSView {
 
 // MARK: - Views
 
-/// Top-centre bar for series: previous · episode list · next, plus the auto-skip switch.
-/// Fades in with pointer activity like AVKit's own controls; the ⇧⌘←/→ shortcuts work even
-/// while it's hidden.
+/// Top-centre bar: for series, previous · episode list · next and the auto-skip switch; for any
+/// stream, the quality menu. Fades in with pointer activity like AVKit's own controls; the
+/// ⇧⌘←/→ shortcuts work even while it's hidden.
 struct PlayerEpisodeBar: View {
     @ObservedObject var model: PlayerOverlayModel
 
     var body: some View {
-        if model.isSeries {
+        let showsQuality = model.qualities.count > 1
+        if model.isSeries || showsQuality {
             HStack(spacing: 2) {
-                barButton("backward.end.fill", enabled: model.canPrevious) { model.onPrevious() }
-                    .help("Previous episode (⇧⌘←)")
-                    .keyboardShortcut(.leftArrow, modifiers: [.command, .shift])
+                if model.isSeries {
+                    barButton("backward.end.fill", enabled: model.canPrevious) { model.onPrevious() }
+                        .help("Previous episode (⇧⌘←)")
+                        .keyboardShortcut(.leftArrow, modifiers: [.command, .shift])
 
-                Menu {
-                    episodeMenu
-                } label: {
-                    Text(verbatim: label)
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .frame(maxWidth: 360)
-                .padding(.horizontal, 6)
-                .help("All episodes")
-
-                barButton("forward.end.fill", enabled: model.canNext) { model.onNext() }
-                    .help("Next episode (⇧⌘→)")
-                    .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
-
-                Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 18)
+                    Menu {
+                        episodeMenu
+                    } label: {
+                        Text(verbatim: label)
+                            .font(.callout.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .frame(maxWidth: 360)
                     .padding(.horizontal, 6)
+                    .help("All episodes")
 
-                Button { model.onToggleAutoSkip(!model.autoSkip) } label: {
-                    Label("Auto-skip", systemImage: model.autoSkip ? "forward.frame.fill" : "forward.frame")
-                        .font(.caption.weight(.semibold))
-                        .opacity(model.autoSkip ? 1 : 0.5)
-                        .padding(.horizontal, 6).padding(.vertical, 4)
-                        .contentShape(Rectangle())
+                    barButton("forward.end.fill", enabled: model.canNext) { model.onNext() }
+                        .help("Next episode (⇧⌘→)")
+                        .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
+
+                    divider
+
+                    Button { model.onToggleAutoSkip(!model.autoSkip) } label: {
+                        Label("Auto-skip", systemImage: model.autoSkip ? "forward.frame.fill" : "forward.frame")
+                            .font(.caption.weight(.semibold))
+                            .opacity(model.autoSkip ? 1 : 0.5)
+                            .padding(.horizontal, 6).padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.autoSkip ? "Skipping intros and credits automatically — click to turn off"
+                                         : "Auto-skip is off — click to skip intros and credits automatically")
                 }
-                .buttonStyle(.plain)
-                .help(model.autoSkip ? "Skipping intros and credits automatically — click to turn off"
-                                     : "Auto-skip is off — click to skip intros and credits automatically")
+                if showsQuality {
+                    if model.isSeries { divider }
+                    qualityMenu
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .foregroundStyle(.white)
@@ -241,6 +251,29 @@ struct PlayerEpisodeBar: View {
             .allowsHitTesting(model.controlsVisible)
             .animation(.easeInOut(duration: 0.2), value: model.controlsVisible)
         }
+    }
+
+    private var divider: some View {
+        Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 18)
+            .padding(.horizontal, 6)
+    }
+
+    /// The playing resolution; picking another swaps it in place (see `PlayerView.switchQuality`).
+    private var qualityMenu: some View {
+        Menu {
+            ForEach(model.qualities, id: \.self) { q in
+                Button { model.onSelectQuality(q) } label: {
+                    if q == model.quality { Label(q, systemImage: "checkmark") } else { Text(q) }
+                }
+            }
+        } label: {
+            Label(model.quality ?? String(localized: "Quality"), systemImage: "slider.horizontal.3")
+                .font(.caption.weight(.semibold))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .help("Quality")
     }
 
     private var label: String {

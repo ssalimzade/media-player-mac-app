@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import AVFoundation
 import UserNotifications
 import Darwin   // getifaddrs / ifaddrs for LAN IP discovery (AirPlay relay)
 
@@ -114,6 +115,14 @@ final class AppState: ObservableObject {
         return try await self.skipAnalysisURL(pageURL: page, season: season, episode: episode,
                                               translator: translator)
     }
+    /// The one AVPlayer every PlayerView plays through. macOS keeps the AirPlay choice on the
+    /// player, so a fresh one per title (or per visit to the player) started back on the Mac every
+    /// time; with one player, a TV picked once stays picked.
+    lazy var player: AVPlayer = {
+        let p = AVPlayer()
+        p.allowsExternalPlayback = true
+        return p
+    }()
     lazy var api = APIClient(sidecar: sidecar) { [weak self] in
         self?.origin ?? "https://hdrezka.ag"
     } cookiesProvider: { [weak self] in

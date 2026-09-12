@@ -57,6 +57,9 @@ enum RemotePage {
   .pill { flex:1; min-width:30%; height:44px; border-radius:12px; background:var(--raise); font-size:14px;
     font-weight:600; white-space:nowrap; }
   .pill.on { background:var(--accent); }
+  .qpill { position:relative; display:flex; align-items:center; justify-content:center; gap:5px; }
+  .qpill::after { content:'▾'; font-size:12px; color:var(--dim); }
+  .qpill select { position:absolute; top:0; left:0; width:100%; height:100%; opacity:0; font-size:16px; }
   .idle { background:var(--card); border-radius:22px; padding:26px 18px; text-align:center; color:var(--dim); }
   .idle b { display:block; color:var(--text); font-size:18px; margin-bottom:4px; }
   .resume { display:flex; align-items:center; gap:14px; width:100%; padding:14px; border-radius:22px;
@@ -98,7 +101,7 @@ enum RemotePage {
     <button id="prev" class="ctl" aria-label="Previous episode"><svg viewBox="0 0 24 24"><path d="M6 5h2.2v14H6zM19.5 5.2v13.6L9.3 12z"/></svg></button>
     <button id="back" class="ctl" aria-label="Back 15 seconds"><svg viewBox="0 0 24 24"><path d="M12 4.5V1.8L7.2 5.6 12 9.4V6.6a6.4 6.4 0 1 1-6.4 6.4H3.5A8.5 8.5 0 1 0 12 4.5z"/><text x="12" y="16.3" font-size="7" font-weight="700" text-anchor="middle">15</text></svg></button>
     <button id="play" class="play" aria-label="Play or pause"></button>
-    <button id="fwd" class="ctl" aria-label="Forward 30 seconds"><svg viewBox="0 0 24 24"><path d="M12 4.5V1.8l4.8 3.8L12 9.4V6.6a6.4 6.4 0 1 0 6.4 6.4h2.1A8.5 8.5 0 1 1 12 4.5z"/><text x="12" y="16.3" font-size="7" font-weight="700" text-anchor="middle">30</text></svg></button>
+    <button id="fwd" class="ctl" aria-label="Forward 15 seconds"><svg viewBox="0 0 24 24"><path d="M12 4.5V1.8l4.8 3.8L12 9.4V6.6a6.4 6.4 0 1 0 6.4 6.4h2.1A8.5 8.5 0 1 1 12 4.5z"/><text x="12" y="16.3" font-size="7" font-weight="700" text-anchor="middle">15</text></svg></button>
     <button id="next" class="ctl" aria-label="Next episode"><svg viewBox="0 0 24 24"><path d="M15.8 5H18v14h-2.2zM4.5 5.2 14.7 12 4.5 18.8z"/></svg></button>
   </div>
   <div id="skiprow" class="skiprow" hidden>
@@ -113,6 +116,8 @@ enum RemotePage {
   <div class="pills">
     <button id="fs" class="pill">Full screen</button>
     <button id="auto" class="pill">Auto-skip</button>
+    <div id="qpill" class="pill qpill" hidden><span id="qlabel">Quality</span><select id="quality" aria-label="Quality"></select></div>
+    <button id="air" class="pill" hidden>Play on Mac</button>
     <button id="close" class="pill">Close player</button>
   </div>
 </section>
@@ -135,7 +140,7 @@ const KEY = new URLSearchParams(location.search).get('k') || '';
 const $ = id => document.getElementById(id);
 const PLAY = '<svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></svg>';
 const PAUSE = '<svg viewBox="0 0 24 24"><path d="M6 4.5h4.2v15H6zM13.8 4.5H18v15h-4.2z"/></svg>';
-let state = null, syncedAt = 0, scrubbing = false, volumeAt = 0, cwKey = '';
+let state = null, syncedAt = 0, scrubbing = false, volumeAt = 0, cwKey = '', qualKey = '', infoEls = {};
 
 async function api(path, body) {
   const r = await fetch(path + '?k=' + encodeURIComponent(KEY), body
@@ -192,6 +197,18 @@ function render(s) {
     $('auto').textContent = 'Auto-skip ' + (n.autoSkip ? 'on' : 'off');
     $('auto').classList.toggle('on', n.autoSkip);
     $('fs').textContent = n.fullScreen ? 'Exit full screen' : 'Full screen';
+    const qs = n.qualities || [];
+    $('qpill').hidden = qs.length < 2;
+    if (qs.join('|') !== qualKey) {
+      qualKey = qs.join('|');
+      const sel = $('quality'); sel.innerHTML = '';
+      for (const q of qs) { const o = document.createElement('option'); o.value = q; o.textContent = q; sel.append(o); }
+    }
+    if (document.activeElement !== $('quality')) $('quality').value = n.quality || '';
+    $('qlabel').textContent = n.quality || 'Quality';
+    // AirPlay can only be picked on the Mac the first time; after that it's switchable from here.
+    $('air').hidden = !(n.airplay || n.airplayOff);
+    $('air').textContent = n.airplay ? 'Play on Mac' : 'Play on TV';
   }
   // Nothing playing: one big button for what you watched last, picked up where you stopped.
   const last = s.continueWatching[0];
@@ -204,9 +221,11 @@ function render(s) {
     ri.hidden = !last.poster;
     $('resume').onclick = () => { toast('Resuming ' + last.title + '…'); send('open', { url: last.url }); };
   }
-  const key = JSON.stringify(s.continueWatching);
-  if (key !== cwKey) {
-    cwKey = key;
+  // Rebuild the tiles only when the list itself changes. Resume times tick every few seconds
+  // while something plays; those update in place (rebuilding reloads — and flashes — every poster).
+  const shape = JSON.stringify(s.continueWatching.map(t => [t.url, t.title, t.poster]));
+  if (shape !== cwKey) {
+    cwKey = shape; infoEls = {};
     const cw = $('cw'); cw.innerHTML = '';
     for (const t of s.continueWatching) {
       const b = document.createElement('button'); b.className = 'tile';
@@ -214,12 +233,17 @@ function render(s) {
       if (t.poster) img.src = t.poster;
       const tt = document.createElement('div'); tt.className = 't'; tt.textContent = t.title;
       const ii = document.createElement('div'); ii.className = 'i';
-      ii.textContent = [t.info, t.resumeAt ? clock(t.resumeAt) : ''].filter(Boolean).join(' · ');
+      infoEls[t.url] = ii;
       b.append(img, tt, ii);
       b.onclick = () => { toast('Opening ' + t.title + '…'); send('open', { url: t.url }); };
       cw.append(b);
     }
     $('cwh').hidden = s.continueWatching.length === 0;
+  }
+  for (const t of s.continueWatching) {
+    const el = infoEls[t.url];
+    const text = [t.info, t.resumeAt ? clock(t.resumeAt) : ''].filter(Boolean).join(' · ');
+    if (el && el.textContent !== text) el.textContent = text;
   }
 }
 
@@ -239,7 +263,7 @@ $('play').onclick = () => {
   send('toggle');
 };
 $('back').onclick = () => send('seek', { value: -15 });
-$('fwd').onclick = () => send('seek', { value: 30 });
+$('fwd').onclick = () => send('seek', { value: 15 });
 $('prev').onclick = () => send('previous');
 $('next').onclick = () => send('next');
 $('skip').onclick = () => send('skip');
@@ -247,6 +271,16 @@ $('noskip').onclick = () => send('cancelSkip');
 $('fs').onclick = () => send('fullScreen');
 $('auto').onclick = () => send('autoSkip', { on: !(state && state.nowPlaying && state.nowPlaying.autoSkip) });
 $('close').onclick = () => send('close');
+$('air').onclick = () => {
+  const onTV = !!(state && state.nowPlaying && state.nowPlaying.airplay);
+  toast(onTV ? 'Moving to the Mac…' : 'Moving to the TV…');
+  send('airplay', { on: !onTV });
+};
+$('quality').addEventListener('change', e => {
+  const q = e.target.value;
+  $('qlabel').textContent = q; toast('Quality: ' + q);
+  send('quality', { quality: q });
+});
 
 const pos = $('pos');
 pos.addEventListener('input', () => {

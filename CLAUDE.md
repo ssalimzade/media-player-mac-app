@@ -70,6 +70,9 @@ Packaged DMG: `./scripts/package.sh` → `build/RezkaPlayer.dmg` (see Packaging 
   `NSHostingView` on a click-transparent `PointerTrackingView` (reveals the bar on pointer
   movement), so the rest of the video stays AVKit's to click. The top-centre bar keeps clear of
   AVKit's corners (volume/PiP/full-screen); the skip countdown sits bottom-right above its control bar.
+  The bar also has a quality menu for streams (movies get just that): `PlayerView.switchQuality`
+  swaps the item in place — paused, then seeked back to the same moment — and makes it the
+  preferred quality, so later episodes follow.
 - **Local playback carries page context.** A local `PlayerTarget` sets `pageURL`, `season`/`episode`
   and `downloadID`, not just the file path. Progress is keyed on the page URL, so without it
   Continue Watching stored a *media file path* as the page URL and then 404'd trying to load the
@@ -151,6 +154,14 @@ AirPlay screen while the Mac reports "playing on TV":
    token-gated, base-name only). It swaps back to the local file when AirPlay disengages; position
    is preserved both ways. Plain local playback stays a direct `file://` read.
 
+4. **One player for the app.** macOS keeps the AirPlay choice on the `AVPlayer`, so a fresh
+   player per title (or per visit to the player) started back on the Mac every time.
+   `AppState.player` is shared by every `PlayerView`, so a TV picked once stays picked. There's no
+   public API to *pick* a route in code (the private `AVOutputDeviceDiscoverySession` returns no
+   devices to us), so the first pick is always the player's AirPlay button; after that the phone
+   remote's "Play on Mac / Play on TV" toggles `allowsExternalPlayback`, and each new player
+   visit turns it back on.
+
 Verified against a Samsung Tizen receiver, which fetches the URL with a `SMART-TV; LINUX; Tizen`
 user-agent. Note this is *AirPlay*, not screen mirroring — mirroring never flips
 `isExternalPlaybackActive`, so none of the above applies to it.
@@ -221,7 +232,7 @@ same Wi-Fi. It's in Swift rather than the sidecar because every command needs th
   and "New link" rotates the key. Toggle: `phoneRemoteEnabled`.
 - **API:** the page polls `GET /api/state` (Now Playing + Continue Watching) every second and
   sends `POST /api/cmd {cmd, value?|on?|url?}`: toggle, seek, seekTo, previous, next, skip,
-  cancelSkip, volume, autoSkip, fullScreen, close, open.
+  cancelSkip, volume, autoSkip, quality, airplay, fullScreen, close, open.
 - **Player:** the `PlayerView` on screen registers a snapshot/command handle
   (`attachRemote`/`detach`); commands act on its `AVPlayer`, so they work over AirPlay too.
   Full screen uses AVPlayerView's `enterFullScreen:`/`exitFullScreen:` (not in the public

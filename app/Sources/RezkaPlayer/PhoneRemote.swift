@@ -16,6 +16,8 @@ final class PhoneRemote {
         case seekTo(Double)
         case volume(Float)
         case autoSkip(Bool)
+        case quality(String)
+        case airPlay(Bool)
     }
 
     struct NowPlaying: Encodable {
@@ -33,7 +35,12 @@ final class PhoneRemote {
         var skipProgress: Double?
         var autoSkip: Bool
         var airplay: Bool
+        /// AirPlay was switched off from the phone, so "Play on TV" can switch it back.
+        var airplayOff: Bool
         var fullScreen: Bool
+        /// The playing resolution and every one on offer, best first (empty for downloads).
+        var quality: String?
+        var qualities: [String]
     }
 
     struct Title: Encodable {
@@ -92,6 +99,7 @@ final class PhoneRemote {
         var value: Double?
         var on: Bool?
         var url: String?
+        var quality: String?
     }
 
     private func perform(_ body: Data) {
@@ -112,6 +120,8 @@ final class PhoneRemote {
         case "seekTo": b.value.map { .seekTo($0) }
         case "volume": b.value.map { .volume(Float($0)) }
         case "autoSkip": b.on.map { .autoSkip($0) }
+        case "quality": b.quality.map { .quality($0) }
+        case "airplay": b.on.map { .airPlay($0) }
         default: nil
         }
         if let command { player?.perform(command) }
