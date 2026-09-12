@@ -59,6 +59,15 @@ enum RemotePage {
   .pill.on { background:var(--accent); }
   .idle { background:var(--card); border-radius:22px; padding:26px 18px; text-align:center; color:var(--dim); }
   .idle b { display:block; color:var(--text); font-size:18px; margin-bottom:4px; }
+  .resume { display:flex; align-items:center; gap:14px; width:100%; padding:14px; border-radius:22px;
+    background:var(--card); text-align:left; }
+  .resume:active { background:var(--raise); }
+  .resume img { width:64px; height:92px; border-radius:10px; object-fit:cover; background:var(--raise); flex:none; }
+  .rtext { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+  .rlabel { font-size:12px; font-weight:700; color:var(--accent); text-transform:uppercase; letter-spacing:.05em; }
+  .rtitle { font-size:19px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rinfo { font-size:14px; color:var(--dim); }
+  .rplay { width:58px; height:58px; padding:17px; border-radius:50%; background:#fff; color:#000; flex:none; }
   h2 { font-size:17px; margin:26px 2px 12px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(96px, 1fr)); gap:12px; }
   .tile { text-align:left; }
@@ -108,7 +117,14 @@ enum RemotePage {
   </div>
 </section>
 
-<section id="idle" class="idle" hidden><b>Nothing playing</b>Pick something below to start it on the Mac.</section>
+<section id="idle" hidden>
+  <button id="resume" class="resume" hidden>
+    <img id="rposter" alt="">
+    <span class="rtext"><span class="rlabel">Resume</span><span id="rtitle" class="rtitle"></span><span id="rinfo" class="rinfo"></span></span>
+    <span class="rplay"><svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></svg></span>
+  </button>
+  <div id="empty" class="idle"><b>Nothing playing</b>Start something on the Mac and it shows up here.</div>
+</section>
 
 <h2 id="cwh" hidden>Continue Watching</h2>
 <div id="cw" class="grid"></div>
@@ -177,6 +193,17 @@ function render(s) {
     $('auto').classList.toggle('on', n.autoSkip);
     $('fs').textContent = n.fullScreen ? 'Exit full screen' : 'Full screen';
   }
+  // Nothing playing: one big button for what you watched last, picked up where you stopped.
+  const last = s.continueWatching[0];
+  $('resume').hidden = !last; $('empty').hidden = !!last;
+  if (!n && last) {
+    $('rtitle').textContent = last.title;
+    $('rinfo').textContent = [last.info, last.resumeAt ? 'from ' + clock(last.resumeAt) : ''].filter(Boolean).join(' · ');
+    const ri = $('rposter');
+    if (last.poster && ri.getAttribute('src') !== last.poster) ri.src = last.poster;
+    ri.hidden = !last.poster;
+    $('resume').onclick = () => { toast('Resuming ' + last.title + '…'); send('open', { url: last.url }); };
+  }
   const key = JSON.stringify(s.continueWatching);
   if (key !== cwKey) {
     cwKey = key;
@@ -186,7 +213,8 @@ function render(s) {
       const img = document.createElement('img'); img.loading = 'lazy'; img.alt = '';
       if (t.poster) img.src = t.poster;
       const tt = document.createElement('div'); tt.className = 't'; tt.textContent = t.title;
-      const ii = document.createElement('div'); ii.className = 'i'; ii.textContent = t.info || '';
+      const ii = document.createElement('div'); ii.className = 'i';
+      ii.textContent = [t.info, t.resumeAt ? clock(t.resumeAt) : ''].filter(Boolean).join(' · ');
       b.append(img, tt, ii);
       b.onclick = () => { toast('Opening ' + t.title + '…'); send('open', { url: t.url }); };
       cw.append(b);

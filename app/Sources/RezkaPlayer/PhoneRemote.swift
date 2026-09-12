@@ -41,6 +41,8 @@ final class PhoneRemote {
         let title: String
         let info: String?
         let poster: String?
+        /// Where opening it resumes (seconds) — when the title page will pick up this very episode.
+        let resumeAt: Double?
     }
 
     struct State: Encodable {
@@ -122,10 +124,13 @@ final class PhoneRemote {
         var out: [Title] = []
         for e in app.progress.recent() where e.pageURL.hasPrefix("http") && !seen.contains(e.pageURL) {
             seen.insert(e.pageURL)
+            // The title page reopens on the page's latest entry (see DetailView.resumeEpisode).
+            let latest = app.progress.latestForPage(e.pageURL)
             out.append(Title(url: e.pageURL,
                              title: e.title.components(separatedBy: " · ").first ?? e.title,
                              info: e.season.flatMap { s in e.episode.map { "S\(s)E\($0)" } },
-                             poster: e.posterURL))
+                             poster: e.posterURL,
+                             resumeAt: latest?.id == e.id && latest?.isComplete == false ? e.position : nil))
             if out.count == 8 { break }
         }
         return out
