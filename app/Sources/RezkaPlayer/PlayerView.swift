@@ -325,7 +325,7 @@ struct PlayerView: View {
         if let e = endObserver { NotificationCenter.default.removeObserver(e) }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { _ in
-                Task { @MainActor in self.handleEnd() }
+                Task { @MainActor in self.itemDidPlayToEnd() }
         }
     }
 
@@ -536,12 +536,16 @@ struct PlayerView: View {
 
     // MARK: End-of-playback + autoplay
 
-    private func handleEnd() {
-        // An AirPlay receiver can report the end when it's merely paused (a Fire TV does, and
-        // this used to mark the episode watched and move on). Believe it only if playback had
-        // actually got there.
+    /// The item says it played to the end. An AirPlay receiver can say so when it's merely
+    /// paused (a Fire TV does, and this used to mark the episode watched and move on), so believe
+    /// it only if playback had actually got there. A credits skip calls `handleEnd` directly.
+    private func itemDidPlayToEnd() {
         if let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
            d - playhead.lastPlaying > 15 { return }
+        handleEnd()
+    }
+
+    private func handleEnd() {
         guard !endHandled else { return }
         endHandled = true
         setSkipPrompt(nil)
