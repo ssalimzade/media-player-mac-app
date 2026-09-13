@@ -47,12 +47,17 @@ final class PlayerOverlayModel: ObservableObject {
         done?()
     }
 
+    /// Puts the controls back in front of AVKit's own controls layer (installed by
+    /// `PlayerOverlayHost`). Runs on every pointer movement, since AVKit adds that layer lazily.
+    var raiseControls: () -> Void = {}
+
     private var hideControls: Task<Void, Never>?
     private var hideToast: Task<Void, Never>?
 
     /// Pointer activity over the video: show the controls, and hide them again after a few idle
     /// seconds, in step with AVKit's own.
     func pointerMoved() {
+        raiseControls()   // before they show, so they can be clicked
         if !controlsVisible { controlsVisible = true }
         hideControls?.cancel()
         hideControls = Task { [weak self] in
@@ -101,11 +106,11 @@ struct EpisodeMenuItem: Identifiable {
 
 // MARK: - Hosting
 
-/// Installs the overlay into AVKit's `contentOverlayView` — between the video and AVKit's own
-/// controls. That view travels with the player into AVKit's full-screen window, so these controls
-/// keep working there (a SwiftUI overlay on top of the player would stay behind in the normal
-/// window). Each piece gets its own content-sized hosting view so the rest of the video stays
-/// AVKit's to click.
+/// Installs the overlay alongside AVKit's `contentOverlayView`, which travels with the player into
+/// AVKit's full-screen window, so these controls keep working there (a SwiftUI overlay on top of
+/// the player would stay behind in the normal window) — but in front of AVKit's own controls
+/// layer, which would otherwise take their clicks (see `raiseControls`). Each piece gets its own
+/// content-sized hosting view so the rest of the video stays AVKit's to click.
 @MainActor
 enum PlayerOverlayHost {
     static func install(in container: NSView, model: PlayerOverlayModel) {
@@ -127,6 +132,19 @@ enum PlayerOverlayHost {
                 fade.animator().alphaValue = on ? 1 : 0
             }, completionHandler: { done?() })
         }
+
+        // AVKit (macOS 26) lays its controls layer, `AVEventPassthroughView`, over the content
+        // overlay once there's video — and for good over AirPlay — and its glass strip swallowed
+        // every click on the episode bar. So this layer sits beside the content overlay, in front
+        // of AVKit's: still click-through except on a control, so AVKit's own controls keep
+        // theirs. Wherever AVKit puts the content overlay (full screen), this follows it.
+        model.raiseControls = { [weak root, weak container] in
+            guard let root, let container, let parent = container.superview,
+                  parent.subviews.last !== root else { return }
+            root.frame = parent.bounds
+            parent.addSubview(root, positioned: .above, relativeTo: nil)
+        }
+        model.raiseControls()
 
         func host<V: View>(_ view: V) -> NSView {
             let h = NSHostingView(rootView: view)

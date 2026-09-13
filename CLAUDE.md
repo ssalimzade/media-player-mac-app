@@ -71,6 +71,13 @@ Packaged DMG: `./scripts/package.sh` → `build/RezkaPlayer.dmg` (see Packaging 
   `NSHostingView` on a click-transparent `PointerTrackingView` (reveals the bar on pointer
   movement), so the rest of the video stays AVKit's to click. The top-centre bar keeps clear of
   AVKit's corners (volume/PiP/full-screen); the skip countdown sits bottom-right above its control bar.
+  **The content overlay is not on top.** Once there's video (and permanently over AirPlay), macOS
+  26's AVKit adds its controls layer, `AVEventPassthroughView`, *above* the content overlay, and
+  its glass strip swallowed every click on the bar. So the controls' click-through layer is a
+  sibling of the content overlay in front of AVKit's (`PlayerOverlayModel.raiseControls`, re-run
+  on every pointer movement since AVKit adds its layer lazily); AVKit's own controls keep their
+  clicks. Verified with real click events on an offscreen `AVPlayerView`, AirPlay faked by
+  swizzling `AVPlayer.isExternalPlaybackActive`.
   The bar also has a quality menu for streams (movies get just that): `PlayerView.switchQuality`
   swaps the item in place — paused, then seeked back to the same moment — and makes it the
   preferred quality, so later episodes follow.
