@@ -2,8 +2,20 @@ import SwiftUI
 import AVKit
 import Combine
 
-/// Where the player was last seen playing. A class, so the per-tick write doesn't re-render the view.
-final class Playhead { var lastPlaying: Double = 0 }
+/// Where the player was last seen playing, and whether this item is (or just was) on AirPlay. A
+/// class, so the per-tick writes don't re-render the view.
+final class Playhead {
+    var lastPlaying: Double = 0
+    var onAirPlay = false
+    /// When AirPlay last switched off (nil while on it).
+    var airPlayOffAt: Date?
+
+    /// On AirPlay, or off it for under 10 s — a receiver may drop the session in the same
+    /// breath as it reports a fake end, so those can arrive in either order.
+    var onAirPlayNow: Bool {
+        onAirPlay && (airPlayOffAt.map { Date().timeIntervalSince($0) < 10 } ?? true)
+    }
+}
 
 struct PlayerView: View {
     let target: PlayerTarget
@@ -242,7 +254,8 @@ struct PlayerView: View {
         curResumeAt = resumeAt
         didSeekResume = false
         introSkipAt = nil; creditsSkipAt = nil
-        introDone = false; creditsDone = false; endHandled = false; playhead.lastPlaying = 0
+        introDone = false; creditsDone = false; endHandled = false
+        playhead.lastPlaying = 0; playhead.onAirPlay = false; playhead.airPlayOffAt = nil
         setSkipPrompt(nil)
         lastRecorded = .distantPast
 
@@ -291,6 +304,7 @@ struct PlayerView: View {
     private func handleExternalPlaybackChange(_ active: Bool) {
         guard active != isExternal else { return }
         isExternal = active
+        playhead.airPlayOffAt = active ? nil : Date()
         overlay.showToast(active ? String(localized: "AirPlay — playing on TV")
                                  : String(localized: "Playing on this Mac"))
 
@@ -348,6 +362,7 @@ struct PlayerView: View {
         let position = time.seconds
         guard position.isFinite, position >= 0 else { return }
         if (player?.rate ?? 0) != 0 { playhead.lastPlaying = position }
+        if player?.isExternalPlaybackActive == true { playhead.onAirPlay = true }
 
         checkSkips(position: position, duration: duration)
         if Date().timeIntervalSince(lastRecorded) >= 5 {
@@ -537,11 +552,19 @@ struct PlayerView: View {
     // MARK: End-of-playback + autoplay
 
     /// The item says it played to the end. An AirPlay receiver can say so when it's merely
-    /// paused (a Fire TV does, and this used to mark the episode watched and move on), so believe
-    /// it only if playback had actually got there. A credits skip calls `handleEnd` directly.
+    /// paused (a Fire TV does, and this used to mark the episode watched and move on), so for an
+    /// item on AirPlay (or just off it), believe it only if playback had actually got there. On
+    /// this Mac an end is always real — dragging to the end while paused must still finish the
+    /// episode. A credits skip calls `handleEnd` directly.
     private func itemDidPlayToEnd() {
-        if let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
-           d - playhead.lastPlaying > 15 { return }
+        if playhead.onAirPlayNow, let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
+           d - playhead.lastPlaying > 15 {
+            // It still leaves the item "ended", and AVKit's Play restarts an ended item from the
+            // top — so put the playhead back where it really was.
+            player?.seek(to: CMTime(seconds: playhead.lastPlaying, preferredTimescale: 600),
+                         toleranceBefore: .zero, toleranceAfter: .zero)
+            return
+        }
         handleEnd()
     }
 

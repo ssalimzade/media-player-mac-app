@@ -172,9 +172,12 @@ AirPlay screen while the Mac reports "playing on TV":
 
 5. **Don't take the receiver's word for the end.** A Fire TV posts `AVPlayerItemDidPlayToEndTime`
    when it's merely *paused*, which marked the episode finished (and scrobbled it) and moved on —
-   sometimes several episodes in a row. `PlayerView.itemDidPlayToEnd` only believes it if the item was
+   sometimes several episodes in a row. While on AirPlay, or under 10 s after leaving it (`Playhead.onAirPlayNow` — the
+   receiver may drop the session as it reports the end; otherwise an end is always real), `PlayerView.itemDidPlayToEnd` only believes it if the item was
    last seen playing within 15 s of its end (`Playhead`) — the credits skip, which ends an
-   episode a minute or more early, calls `handleEnd` directly; `ProgressStore.load` un-finishes entries marked
+   episode a minute or more early, calls `handleEnd` directly. A disbelieved end also seeks back to that
+   spot: the item is left "ended", and AVKit's Play restarts an ended item from 0 (which then
+   overwrote the resume point). `ProgressStore.load` un-finishes entries marked
    finished before 75% of the way in (their position was kept, so they resume again).
 
 Verified against a Samsung Tizen receiver, which fetches the URL with a `SMART-TV; LINUX; Tizen`

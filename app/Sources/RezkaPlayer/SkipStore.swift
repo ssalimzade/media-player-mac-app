@@ -16,6 +16,11 @@ final class SkipStore: ObservableObject {
         /// every playback. A network failure leaves these false so it's retried next time.
         var introChecked: Bool
         var creditsChecked: Bool
+        /// Neighbouring episodes this one's intro has been compared with (their keys) — see
+        /// `SkipDetector.introPairsWanted`.
+        var introPairs: [String]?
+        /// Every neighbour on offer was tried without reaching that many.
+        var introExhausted: Bool?
         var updatedAt: Date
         /// The detector revision that found these. Older markers are dropped on load and found
         /// again — from the cached fingerprints, so that downloads nothing.

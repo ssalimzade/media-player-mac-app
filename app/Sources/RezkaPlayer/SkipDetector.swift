@@ -89,17 +89,23 @@ actor SkipDetector {
         defer { session.close() }
 
         // 1) The episode being watched, against its neighbours until both parts are settled.
+        // Neighbours whose intro is already known go first: it carries over whole (`mergeIntros`).
+        var ordered: [SkipEpisode] = []
+        for n in neighbours {
+            if await store.markers(for: n.key)?.intro != nil { ordered.append(n) }
+        }
+        ordered += neighbours.filter { !ordered.contains($0) }
         var introTried = false, creditsTried = false
-        for ref in neighbours where !Task.isCancelled {
+        for ref in ordered where !Task.isCancelled {
             let (i, c) = await compare(current, ref, session: session)
             introTried = introTried || i
             creditsTried = creditsTried || c
             if await isSettled(current) { break }
         }
-        // Tried every neighbour and found nothing: remember that, so it isn't redone each time.
+        // Tried every neighbour without settling: remember that, so it isn't redone each time.
         let key = current.key
         await store.update(key) { m in
-            if introTried { m.introChecked = true }
+            if introTried, !Self.introSettled(m) { m.introExhausted = true }
             if creditsTried { m.creditsChecked = true }
         }
 
@@ -109,9 +115,44 @@ actor SkipDetector {
         }
     }
 
+    /// Neighbours an intro is compared with. The theme is one recording, so each finds the same
+    /// span — unless half of it is talked over in one of them (a dub's voice-over), which then
+    /// shares only the other half (The Sopranos S1E10/E13: from 0:33/0:45 instead of 0:01). Two
+    /// neighbours, plus borrowing what a neighbour already knows, stop that leaving it half-found.
+    static let introPairsWanted = 2
+
+    static func introSettled(_ m: SkipStore.Markers?) -> Bool {
+        guard let m else { return false }
+        return (m.introPairs?.count ?? 0) >= introPairsWanted || m.introExhausted == true
+    }
+
     private func isSettled(_ ep: SkipEpisode) async -> Bool {
         let m = await store.markers(for: ep.key)
-        return (m?.introChecked ?? false) && (m?.creditsChecked ?? false)
+        return Self.introSettled(m) && (m?.creditsChecked ?? false)
+    }
+
+    /// Intro spans for both episodes of a compared pair: what they share, grown by what's already
+    /// known about either — its own intro from another neighbour, or the partner's, moved across
+    /// by the offset the match lines them up at. Only estimates overlapping the shared span count,
+    /// and never past a plausible intro length. No shared span: what was known stands.
+    static func mergeIntros(shared: (a: (start: Double, end: Double), b: (start: Double, end: Double))?,
+                            knownA: ClosedRange<Double>?, knownB: ClosedRange<Double>?)
+        -> (a: ClosedRange<Double>?, b: ClosedRange<Double>?) {
+        guard let s = shared else { return (knownA, knownB) }
+        let delta = s.a.start - s.b.start               // a's time = b's time + delta
+        func moved(_ r: ClosedRange<Double>?, by d: Double) -> ClosedRange<Double>? {
+            r.map { ($0.lowerBound + d)...($0.upperBound + d) }
+        }
+        func widen(_ base: ClosedRange<Double>, _ others: [ClosedRange<Double>?]) -> ClosedRange<Double> {
+            var r = base
+            for case let o? in others where o.overlaps(r) {
+                let u = max(0, min(r.lowerBound, o.lowerBound))...max(r.upperBound, o.upperBound)
+                if u.upperBound - u.lowerBound <= introMaxLength { r = u }
+            }
+            return r
+        }
+        return (widen(s.a.start...s.a.end, [knownA, moved(knownB, by: delta)]),
+                widen(s.b.start...s.b.end, [knownB, moved(knownA, by: -delta)]))
     }
 
     /// Compare two episodes' heads (intro) and tails (credits), storing whatever is found for
@@ -121,22 +162,26 @@ actor SkipDetector {
         var ranIntro = false, ranCredits = false
         let ma = await store.markers(for: a.key)
 
-        if !(ma?.introChecked ?? false),
+        if !Self.introSettled(ma), !(ma?.introPairs ?? []).contains(b.key),
            let pa = await prints(a, .head, session), let pb = await prints(b, .head, session) {
             ranIntro = true
-            if let seg = Self.longestShared(pa.bits, pb.bits,
-                                            minFrames: Self.frames(Self.introMinLength),
-                                            maxFrames: Self.frames(Self.introMaxLength)) {
-                let (aStart, aEnd) = Self.span(seg.a, in: pa)
-                let (bStart, bEnd) = Self.span(seg.b, in: pb)
-                await store.update(a.key) { m in
-                    m.introStart = aStart; m.introEnd = aEnd; m.introChecked = true
-                }
-                if await store.markers(for: b.key)?.intro == nil {
-                    await store.update(b.key) { m in
-                        m.introStart = bStart; m.introEnd = bEnd; m.introChecked = true
-                    }
-                }
+            let seg = Self.longestShared(pa.bits, pb.bits,
+                                         minFrames: Self.frames(Self.introMinLength),
+                                         maxFrames: Self.frames(Self.introMaxLength))
+            let mb = await store.markers(for: b.key)
+            let (aIntro, bIntro) = Self.mergeIntros(
+                shared: seg.map { (a: Self.span($0.a, in: pa), b: Self.span($0.b, in: pb)) },
+                knownA: ma?.intro, knownB: mb?.intro)
+            // One comparison answers for both episodes: each keeps its best estimate so far.
+            await store.update(a.key) { m in
+                m.introStart = aIntro?.lowerBound; m.introEnd = aIntro?.upperBound
+                if !(m.introPairs ?? []).contains(b.key) { m.introPairs = (m.introPairs ?? []) + [b.key] }
+                m.introChecked = true
+            }
+            await store.update(b.key) { m in
+                m.introStart = bIntro?.lowerBound; m.introEnd = bIntro?.upperBound
+                if !(m.introPairs ?? []).contains(a.key) { m.introPairs = (m.introPairs ?? []) + [a.key] }
+                m.introChecked = true
             }
         }
 
