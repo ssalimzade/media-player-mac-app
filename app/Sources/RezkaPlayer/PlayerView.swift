@@ -2,18 +2,76 @@ import SwiftUI
 import AVKit
 import Combine
 
+/// A small rolling log of what the player did — which of the receiver's reports arrived, in what
+/// order, and what we did about them. An AirPlay receiver's misbehaviour can't be reconstructed
+/// afterwards without it (`player-events.log` in Application Support, trimmed at 256 KB).
+enum PlayerLog {
+    private static let queue = DispatchQueue(label: "player-log")
+    private static let file: URL? = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("RezkaPlayer", isDirectory: true)
+        guard let dir else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("player-events.log")
+    }()
+
+    /// Takes a finished string: the caller's state is read here, not later on the writing queue.
+    static func note(_ text: String) {
+        let stamp = Date()
+        queue.async {
+            guard let file else { return }
+            let f = DateFormatter()
+            f.dateFormat = "dd MMM HH:mm:ss.SSS"
+            let line = "\(f.string(from: stamp))  \(text)\n"
+            if let handle = try? FileHandle(forWritingTo: file) {
+                defer { try? handle.close() }
+                if ((try? handle.seekToEnd()) ?? 0) > 256 * 1024 {   // keep the tail only
+                    let tail = (try? Data(contentsOf: file))?.suffix(64 * 1024) ?? Data()
+                    try? Data(tail).write(to: file, options: .atomic)
+                    try? Data(line.utf8).append(to: file)
+                    return
+                }
+                try? handle.write(contentsOf: Data(line.utf8))
+            } else {
+                try? Data(line.utf8).write(to: file, options: .atomic)
+            }
+        }
+    }
+}
+
+private extension Data {
+    func append(to url: URL) throws {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: self)
+    }
+}
+
 /// Where the player was last seen playing, and whether this item is (or just was) on AirPlay. A
 /// class, so the per-tick writes don't re-render the view.
 final class Playhead {
     var lastPlaying: Double = 0
+    /// This item has played over AirPlay at some point — it stays set for the rest of the episode,
+    /// because a receiver drops the session *before* reporting its fake end (seen minutes apart),
+    /// so "are we on AirPlay right now?" says nothing about who sent the end.
     var onAirPlay = false
-    /// When AirPlay last switched off (nil while on it).
-    var airPlayOffAt: Date?
+    /// Where to go back to if the item restarts from the top right after an end we didn't believe.
+    var restoreTo: Double?
+    var restoreUntil = Date.distantPast
+    /// Where the playhead stands while paused, and since when it has been sitting away from
+    /// `restoreTo` — a receiver's own restart blips through the start in an instant, while
+    /// someone scrubbing there leaves it sitting.
+    var pausedAt: Double?
+    var awayFromRestoreSince: Date?
 
-    /// On AirPlay, or off it for under 10 s — a receiver may drop the session in the same
-    /// breath as it reports a fake end, so those can arrive in either order.
-    var onAirPlayNow: Bool {
-        onAirPlay && (airPlayOffAt.map { Date().timeIntervalSince($0) < 10 } ?? true)
+    func reset() {
+        lastPlaying = 0
+        onAirPlay = false
+        restoreTo = nil
+        restoreUntil = .distantPast
+        pausedAt = nil
+        awayFromRestoreSince = nil
     }
 }
 
@@ -255,7 +313,7 @@ struct PlayerView: View {
         didSeekResume = false
         introSkipAt = nil; creditsSkipAt = nil
         introDone = false; creditsDone = false; endHandled = false
-        playhead.lastPlaying = 0; playhead.onAirPlay = false; playhead.airPlayOffAt = nil
+        playhead.reset()
         setSkipPrompt(nil)
         lastRecorded = .distantPast
 
@@ -304,7 +362,7 @@ struct PlayerView: View {
     private func handleExternalPlaybackChange(_ active: Bool) {
         guard active != isExternal else { return }
         isExternal = active
-        playhead.airPlayOffAt = active ? nil : Date()
+        PlayerLog.note("AirPlay \(active ? "on" : "off") at \(Self.stamp(player?.currentTime().seconds))")
         overlay.showToast(active ? String(localized: "AirPlay — playing on TV")
                                  : String(localized: "Playing on this Mac"))
 
@@ -361,8 +419,17 @@ struct PlayerView: View {
         guard duration.isFinite, duration > 0 else { return }   // skip until duration known
         let position = time.seconds
         guard position.isFinite, position >= 0 else { return }
-        if (player?.rate ?? 0) != 0 { playhead.lastPlaying = position }
+        if (player?.rate ?? 0) != 0 {
+            playhead.lastPlaying = position
+        } else {
+            playhead.pausedAt = position
+            if let to = playhead.restoreTo {
+                if abs(position - to) <= 10 { playhead.awayFromRestoreSince = nil }
+                else if playhead.awayFromRestoreSince == nil { playhead.awayFromRestoreSince = Date() }
+            }
+        }
         if player?.isExternalPlaybackActive == true { playhead.onAirPlay = true }
+        restoreAfterFakeEnd(position: position)
 
         checkSkips(position: position, duration: duration)
         if Date().timeIntervalSince(lastRecorded) >= 5 {
@@ -557,20 +624,63 @@ struct PlayerView: View {
     /// this Mac an end is always real — dragging to the end while paused must still finish the
     /// episode. A credits skip calls `handleEnd` directly.
     private func itemDidPlayToEnd() {
-        if playhead.onAirPlayNow, let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
+        let position = player?.currentTime().seconds
+        if playhead.onAirPlay, let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
            d - playhead.lastPlaying > 15 {
+            PlayerLog.note("end reported at \(Self.stamp(position)) of \(Self.stamp(d)) — not believed,"
+                           + " last playing \(Self.stamp(playhead.lastPlaying)); seeking back there")
             // It still leaves the item "ended", and AVKit's Play restarts an ended item from the
-            // top — so put the playhead back where it really was.
+            // top — so put the playhead back where it really was, and if it restarts anyway
+            // (the receiver's own doing), `restoreAfterFakeEnd` puts it back once it resumes.
+            playhead.restoreTo = playhead.lastPlaying
+            playhead.restoreUntil = Date().addingTimeInterval(180)
+            playhead.awayFromRestoreSince = nil
             player?.seek(to: CMTime(seconds: playhead.lastPlaying, preferredTimescale: 600),
                          toleranceBefore: .zero, toleranceAfter: .zero)
             return
         }
+        PlayerLog.note("end reported at \(Self.stamp(position)) — believed"
+                       + " (last playing \(Self.stamp(playhead.lastPlaying)), AirPlay \(playhead.onAirPlay))")
         handleEnd()
+    }
+
+    /// Seconds as m:ss for the log.
+    private static func stamp(_ t: Double?) -> String {
+        guard let t, t.isFinite else { return "?" }
+        return String(format: "%d:%02d", Int(t) / 60, Int(t) % 60)
+    }
+
+    /// A receiver that reported an end it didn't mean can also restart the item from the top when
+    /// playback resumes (AVKit replays an item it believes ended). Within a few minutes of an end
+    /// we didn't believe, a resume that begins at the very start goes back where the episode was.
+    private func restoreAfterFakeEnd(position: Double) {
+        guard let to = playhead.restoreTo, let p = player, p.rate != 0 else { return }
+        guard Date() <= playhead.restoreUntil else { playhead.restoreTo = nil; return }
+        guard position < 5 else {
+            playhead.restoreTo = nil            // resumed where it was: nothing to undo
+            return
+        }
+        guard to > 30 else { playhead.restoreTo = nil; return }
+        // Only when it went back to the top by itself: a receiver's restart blips through the
+        // start (seek, then play) in an instant, while someone who scrubbed there leaves the
+        // playhead sitting there while paused — and is left alone.
+        if let away = playhead.awayFromRestoreSince, Date().timeIntervalSince(away) > 2 {
+            playhead.restoreTo = nil
+            PlayerLog.note("resumed at \(Self.stamp(position)) after sitting at "
+                           + "\(Self.stamp(playhead.pausedAt)) — went back on purpose, left alone")
+            return
+        }
+        playhead.restoreTo = nil
+        PlayerLog.note("restarted from the top after that end; going back to \(Self.stamp(to))")
+        p.seek(to: CMTime(seconds: to, preferredTimescale: 600),
+               toleranceBefore: .zero, toleranceAfter: .zero)
+        overlay.showToast(String(localized: "Back where you left off"))
     }
 
     private func handleEnd() {
         guard !endHandled else { return }
         endHandled = true
+        PlayerLog.note("finishing S\(curSeason ?? 0)E\(curEpisode ?? 0) and moving on")
         setSkipPrompt(nil)
         state.progress.markFinished(id: currentKey())
         state.watched.mark(url: target.pageURL ?? target.urlString,
@@ -648,6 +758,8 @@ struct PlayerView: View {
     /// Switch to another episode of the series, resuming it if it was part-watched.
     private func jump(to ref: EpisodeRef) {
         guard !advancing, ref != currentRef else { return }
+        PlayerLog.note("switching from S\(curSeason ?? 0)E\(curEpisode ?? 0)"
+                       + " at \(Self.stamp(player?.currentTime().seconds)) to \(ref.tag)")
         // Save exactly where the outgoing episode stopped (the periodic save is every 5 s), so
         // coming back to it picks up there.
         if let p = player, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 {
