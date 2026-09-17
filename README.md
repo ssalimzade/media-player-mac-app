@@ -73,17 +73,30 @@ See **`CLAUDE.md`** for architecture details, conventions, and the full endpoint
 
 ## Getting started (development)
 
+Needs **Xcode 26**, **xcodegen** (`brew install xcodegen`) and **Python 3.9+**. The `Makefile`
+wraps the whole loop — `make` on its own lists every target:
+
 ```bash
-# 1. Sidecar deps (Python 3.9+). The app launches the sidecar itself; this is just the venv it uses.
+make doctor      # check the toolchain before you start
+make run         # venv + xcodegen + build (Debug) + launch
+```
+
+Or by hand:
+
+```bash
+# 1. Sidecar deps. The app launches the sidecar itself; this is just the venv it uses.
 cd sidecar
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # requests, beautifulsoup4, PySocks
 
-# 2. App (needs Xcode 26 and xcodegen: `brew install xcodegen`)
+# 2. App
 cd ../app
 xcodegen generate
 open RezkaPlayer.xcodeproj                # ⌘R to run
 ```
+
+Other useful targets: `make xcode` (open in Xcode), `make sidecar` / `make health` (run and probe
+the sidecar standalone on `PORT`, default 8777), `make dmg` (packaged build), `make clean`.
 
 On first run, open **Settings** and set the HDRezka mirror domain (and a proxy if needed).
 

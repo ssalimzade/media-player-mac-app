@@ -16,6 +16,9 @@ DerivedData/
 *.vtt
 downloads/
 
+# Local agent/editor settings
+.claude/
+
 # Packaging / build artifacts
 build/
 sidecar/build/

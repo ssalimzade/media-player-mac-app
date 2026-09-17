@@ -43,8 +43,17 @@ final class SidecarManager: ObservableObject {
 
     static var defaultSidecarDir: String {
         if let v = UserDefaults.standard.string(forKey: "sidecarDir"), !v.isEmpty { return v }
-        // Dev default: the repo's sidecar folder.
-        return "/Users/rinatmaltsev/Documents/Python Projects/media-player-mac-app/media-player-mac-app/sidecar"
+        // Dev default: this checkout's sidecar/ folder, derived from where this file sat at
+        // compile time, so a source build works on any machine without per-dev setup. (It used
+        // to be one developer's absolute home path, which left every other checkout with a dead
+        // sidecar and a silent "Nothing here yet".) Release builds prefer the bundled frozen
+        // sidecar and never reach this; override via Settings → Sidecar folder if needed.
+        let repoRoot = URL(fileURLWithPath: #filePath)   // <repo>/app/Sources/RezkaPlayer/Sidecar.swift
+            .deletingLastPathComponent()                 // <repo>/app/Sources/RezkaPlayer
+            .deletingLastPathComponent()                 // <repo>/app/Sources
+            .deletingLastPathComponent()                 // <repo>/app
+            .deletingLastPathComponent()                 // <repo>
+        return repoRoot.appendingPathComponent("sidecar").path
     }
 
     private var sidecarDir: String { Self.defaultSidecarDir }
