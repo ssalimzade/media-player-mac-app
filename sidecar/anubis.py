@@ -32,7 +32,14 @@ _CHALLENGE_MARKER = b"anubis_challenge"
 _CHALLENGE_RE = re.compile(
     r'id="anubis_challenge"[^>]*>(.*?)</script>', re.S)
 _PASS_PATH = "/.within.website/x/cmd/anubis/api/pass-challenge"
+# Older Anubis named the cookie exactly this; newer releases (seen on v1.27) add a per-site
+# suffix, e.g. `techaro.lol-anubis-auth-d82da6a5`. Match both, or a correct solve goes unnoticed
+# and the challenge page is handed to the parser as if it were the title.
 _AUTH_COOKIE = "techaro.lol-anubis-auth"
+
+
+def _is_auth_cookie(name):
+    return name == _AUTH_COOKIE or name.startswith(_AUTH_COOKIE + "-")
 
 # Per-host cache of solved auth cookies: host -> list[(name, value, domain)].
 _cache = {}
@@ -74,7 +81,7 @@ def _store_auth(session, host):
     cookies = [
         (c.name, c.value, c.domain)
         for c in session.cookies
-        if c.name == _AUTH_COOKIE and c.value
+        if _is_auth_cookie(c.name) and c.value
     ]
     if cookies:
         with _lock:
@@ -121,7 +128,7 @@ def _solve_challenge(session, resp, headers, proxies):
         headers=headers, proxies=proxies, allow_redirects=True, timeout=(15, 60),
     )
     _store_auth(session, urlparse(pass_resp.url).hostname or "")
-    return session.cookies.get(_AUTH_COOKIE) is not None
+    return any(_is_auth_cookie(c.name) and c.value for c in session.cookies)
 
 
 def _patched_request(self, method, url, **kwargs):
