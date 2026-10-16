@@ -177,15 +177,25 @@ AirPlay screen while the Mac reports "playing on TV":
    reports its fake end, so "on AirPlay right now?" says nothing about who sent it),
    `PlayerView.itemDidPlayToEnd` only believes an end if the item was
    last seen playing within 15 s of its end (`Playhead`) — the credits skip, which ends an
-   episode a minute or more early, calls `handleEnd` directly. A disbelieved end also seeks back to that
-   spot: the item is left "ended", and AVKit's Play (or F8) restarts an ended item from 0 (which
-   then overwrote the resume point). Should it restart anyway — the receiver's own doing —
-   `restoreAfterFakeEnd` seeks back once playback resumes at the very start within 3 min of such
-   an end — but only when the playhead hadn't been *sitting* away from that spot
-   while paused: a receiver's restart blips through the start (seek, then play) in an instant,
-   while someone who scrubbed there leaves it there — and is left alone. What a receiver actually did, and in what order, is otherwise unknowable after the
-   fact, so `PlayerLog` keeps the last events in `player-events.log` (Application Support). `ProgressStore.load` un-finishes entries marked
-   finished before 75% of the way in (their position was kept, so they resume again).
+   episode a minute or more early, calls `handleEnd` directly.
+
+6. **Don't take the receiver's word for the position either.** After a pause the Fire TV's
+   session lapses, and on Play it re-fetches the URL from byte 0: the playhead simply reappears at
+   0:00 (seen in `player-events.log`). This is *not* AVKit — an offscreen harness showed AVKit's
+   Play (`AVPlayerController togglePlayback:`) restarts from 0 only when `currentTime` sits *at*
+   the item's end, never because an end notification arrived mid-item; so a disbelieved end only
+   seeks back if the position really is at the end. `Playhead` (its own file, so a harness can
+   compile it) judges every 0.25 s tick: on AirPlay, playing at <5 s with >60 s watched, not asked
+   for → `.putBack(to: lastPlaying)`. "Asked for" = an app seek (`expectSeek(to:)` before every one;
+   nothing is learned until it lands within 3 s of its target), a deliberate rewind (sat paused at
+   the start >1.5 s), the viewer insisting (back at the start within 20 s of a put-back that
+   landed), or a phone-remote seek (`movedOnPurpose`). A put-back the TV ignores is retried up to 3
+   times, the budget renewing after 60 s of ordinary playback. Every progress save goes through
+   `trustedPosition`, so a transient 0:00 never becomes the resume point. Mac-only playback is
+   untouched. What a receiver actually did, and in what order, is otherwise unknowable after the
+   fact, so `PlayerLog` keeps the last events in `player-events.log` (Application Support).
+   `ProgressStore.load` un-finishes entries marked finished before 75% of the way in (their
+   position was kept, so they resume again).
 
 Verified against a Samsung Tizen receiver, which fetches the URL with a `SMART-TV; LINUX; Tizen`
 user-agent. Note this is *AirPlay*, not screen mirroring — mirroring never flips
@@ -283,7 +293,9 @@ transparently: `install()` (called at the top of `server.py`, before any request
 monkeypatches `requests.Session.request` so *all* sidecar traffic — our `browse` module **and**
 the vendored `hdrezka` library, with no edits to either — detects a challenge, solves the
 "fast" SHA-256 PoW (`sha256(randomData + nonce)` with `difficulty` leading zero nibbles),
-GETs `…/api/pass-challenge`, caches the `techaro.lol-anubis-auth` cookie per host, and retries
+GETs `…/api/pass-challenge`, caches the `techaro.lol-anubis-auth` cookie per host (newer Anubis,
+seen on v1.27, suffixes it per site — `techaro.lol-anubis-auth-<hash>` — so match the prefix, or a
+correct solve goes unnoticed and the challenge page reaches the parser), and retries
 once. Streamed requests (the `/relay` CDN pull, `stream=True`) are passed through untouched.
 The cache self-heals: an expired cookie just yields a fresh challenge that gets re-solved. If
 HDRezka bumps Anubis to a GPU/non-`fast` algorithm, `_solve_pow` needs updating.

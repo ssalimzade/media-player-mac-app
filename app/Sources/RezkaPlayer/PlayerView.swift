@@ -48,33 +48,6 @@ private extension Data {
     }
 }
 
-/// Where the player was last seen playing, and whether this item is (or just was) on AirPlay. A
-/// class, so the per-tick writes don't re-render the view.
-final class Playhead {
-    var lastPlaying: Double = 0
-    /// This item has played over AirPlay at some point — it stays set for the rest of the episode,
-    /// because a receiver drops the session *before* reporting its fake end (seen minutes apart),
-    /// so "are we on AirPlay right now?" says nothing about who sent the end.
-    var onAirPlay = false
-    /// Where to go back to if the item restarts from the top right after an end we didn't believe.
-    var restoreTo: Double?
-    var restoreUntil = Date.distantPast
-    /// Where the playhead stands while paused, and since when it has been sitting away from
-    /// `restoreTo` — a receiver's own restart blips through the start in an instant, while
-    /// someone scrubbing there leaves it sitting.
-    var pausedAt: Double?
-    var awayFromRestoreSince: Date?
-
-    func reset() {
-        lastPlaying = 0
-        onAirPlay = false
-        restoreTo = nil
-        restoreUntil = .distantPast
-        pausedAt = nil
-        awayFromRestoreSince = nil
-    }
-}
-
 struct PlayerView: View {
     let target: PlayerTarget
     @EnvironmentObject var state: AppState
@@ -195,7 +168,9 @@ struct PlayerView: View {
         // Save the exact stop position — the periodic observer only records every few seconds.
         if let p = player, let item = p.currentItem {
             let d = item.duration.seconds, t = p.currentTime().seconds
-            if d.isFinite, d > 0, t.isFinite, t >= 0 { recordProgress(position: t, duration: d) }
+            if d.isFinite, d > 0, t.isFinite, t >= 0 {
+                recordProgress(position: playhead.trustedPosition(t), duration: d)
+            }
         }
         player?.pause()
         if let t = timeObserver { player?.removeTimeObserver(t); timeObserver = nil }
@@ -250,6 +225,7 @@ struct PlayerView: View {
             .receive(on: DispatchQueue.main)
             .sink { status in
                 guard status == .readyToPlay else { return }
+                self.playhead.expectSeek(to: at.seconds)
                 p.seek(to: at, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
                     if wasPlaying { DispatchQueue.main.async { p.play() } }
                 }
@@ -386,6 +362,7 @@ struct PlayerView: View {
             .receive(on: DispatchQueue.main)
             .sink { status in
                 if status == .readyToPlay {
+                    self.playhead.expectSeek(to: resumeAt.seconds)
                     p.seek(to: resumeAt)
                     p.play()
                     self.swapReadyObserver?.cancel(); self.swapReadyObserver = nil
@@ -408,6 +385,7 @@ struct PlayerView: View {
             didSeekResume = true; return
         }
         didSeekResume = true
+        playhead.expectSeek(to: curResumeAt)
         player?.seek(to: CMTime(seconds: curResumeAt, preferredTimescale: 600))
     }
 
@@ -419,22 +397,27 @@ struct PlayerView: View {
         guard duration.isFinite, duration > 0 else { return }   // skip until duration known
         let position = time.seconds
         guard position.isFinite, position >= 0 else { return }
-        if (player?.rate ?? 0) != 0 {
-            playhead.lastPlaying = position
-        } else {
-            playhead.pausedAt = position
-            if let to = playhead.restoreTo {
-                if abs(position - to) <= 10 { playhead.awayFromRestoreSince = nil }
-                else if playhead.awayFromRestoreSince == nil { playhead.awayFromRestoreSince = Date() }
-            }
-        }
         if player?.isExternalPlaybackActive == true { playhead.onAirPlay = true }
-        restoreAfterFakeEnd(position: position)
+
+        let playing = (player?.rate ?? 0) != 0
+        let verdict = playhead.observe(position: position, playing: playing)
+        if let note = playhead.note { PlayerLog.note(note) }
+        if case .putBack(let to) = verdict {
+            putBack(to: to)
+            return
+        }
 
         checkSkips(position: position, duration: duration)
         if Date().timeIntervalSince(lastRecorded) >= 5 {
-            recordProgress(position: position, duration: duration)
+            recordProgress(position: playhead.trustedPosition(position), duration: duration)
         }
+    }
+
+    /// The stream went back to the start by itself (see `Playhead`): return to where it was.
+    private func putBack(to: Double) {
+        player?.seek(to: CMTime(seconds: to, preferredTimescale: 600),
+                     toleranceBefore: .zero, toleranceAfter: .zero)
+        overlay.showToast(String(localized: "Back where you left off"))
     }
 
     private func recordProgress(position: Double, duration: Double) {
@@ -517,6 +500,7 @@ struct PlayerView: View {
         introSkipAt = nil
         setSkipPrompt(nil)
         cut { reveal in
+            playhead.expectSeek(to: end)
             player?.seek(to: CMTime(seconds: end, preferredTimescale: 600),
                          toleranceBefore: .zero,
                          toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { _ in
@@ -627,16 +611,22 @@ struct PlayerView: View {
         let position = player?.currentTime().seconds
         if playhead.onAirPlay, let d = player?.currentItem?.duration.seconds, d.isFinite, d > 0,
            d - playhead.lastPlaying > 15 {
-            PlayerLog.note("end reported at \(Self.stamp(position)) of \(Self.stamp(d)) — not believed,"
-                           + " last playing \(Self.stamp(playhead.lastPlaying)); seeking back there")
-            // It still leaves the item "ended", and AVKit's Play restarts an ended item from the
-            // top — so put the playhead back where it really was, and if it restarts anyway
-            // (the receiver's own doing), `restoreAfterFakeEnd` puts it back once it resumes.
-            playhead.restoreTo = playhead.lastPlaying
-            playhead.restoreUntil = Date().addingTimeInterval(180)
-            playhead.awayFromRestoreSince = nil
-            player?.seek(to: CMTime(seconds: playhead.lastPlaying, preferredTimescale: 600),
-                         toleranceBefore: .zero, toleranceAfter: .zero)
+            // AVFoundation can post this twice for one item; say so once.
+            if Date().timeIntervalSince(playhead.lastDisbelievedEnd) > 1 {
+                PlayerLog.note("end reported at \(Self.stamp(position)) of \(Self.stamp(d))"
+                               + " — not believed, it was at \(Self.stamp(playhead.lastPlaying))")
+            }
+            playhead.lastDisbelievedEnd = Date()
+            // AVKit's Play (and F8) replays from 0:00 an item whose *position* sits at its end —
+            // not one that merely got this notification (both verified). So only if the playhead
+            // was actually moved to the end does it need taking back; seeking it to where it
+            // already is does nothing. A receiver that restarts the stream anyway is caught by
+            // `Playhead.observe`.
+            if let position, position.isFinite, d - position < 2 {
+                playhead.expectSeek(to: playhead.lastPlaying)
+                player?.seek(to: CMTime(seconds: playhead.lastPlaying, preferredTimescale: 600),
+                             toleranceBefore: .zero, toleranceAfter: .zero)
+            }
             return
         }
         PlayerLog.note("end reported at \(Self.stamp(position)) — believed"
@@ -648,33 +638,6 @@ struct PlayerView: View {
     private static func stamp(_ t: Double?) -> String {
         guard let t, t.isFinite else { return "?" }
         return String(format: "%d:%02d", Int(t) / 60, Int(t) % 60)
-    }
-
-    /// A receiver that reported an end it didn't mean can also restart the item from the top when
-    /// playback resumes (AVKit replays an item it believes ended). Within a few minutes of an end
-    /// we didn't believe, a resume that begins at the very start goes back where the episode was.
-    private func restoreAfterFakeEnd(position: Double) {
-        guard let to = playhead.restoreTo, let p = player, p.rate != 0 else { return }
-        guard Date() <= playhead.restoreUntil else { playhead.restoreTo = nil; return }
-        guard position < 5 else {
-            playhead.restoreTo = nil            // resumed where it was: nothing to undo
-            return
-        }
-        guard to > 30 else { playhead.restoreTo = nil; return }
-        // Only when it went back to the top by itself: a receiver's restart blips through the
-        // start (seek, then play) in an instant, while someone who scrubbed there leaves the
-        // playhead sitting there while paused — and is left alone.
-        if let away = playhead.awayFromRestoreSince, Date().timeIntervalSince(away) > 2 {
-            playhead.restoreTo = nil
-            PlayerLog.note("resumed at \(Self.stamp(position)) after sitting at "
-                           + "\(Self.stamp(playhead.pausedAt)) — went back on purpose, left alone")
-            return
-        }
-        playhead.restoreTo = nil
-        PlayerLog.note("restarted from the top after that end; going back to \(Self.stamp(to))")
-        p.seek(to: CMTime(seconds: to, preferredTimescale: 600),
-               toleranceBefore: .zero, toleranceAfter: .zero)
-        overlay.showToast(String(localized: "Back where you left off"))
     }
 
     private func handleEnd() {
@@ -763,7 +726,7 @@ struct PlayerView: View {
         // Save exactly where the outgoing episode stopped (the periodic save is every 5 s), so
         // coming back to it picks up there.
         if let p = player, let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 {
-            let t = p.currentTime().seconds
+            let t = playhead.trustedPosition(p.currentTime().seconds)
             if t.isFinite, t > 0 { recordProgress(position: min(t, d), duration: d) }
         }
         let resume = savedResume(for: ref)
@@ -899,6 +862,8 @@ struct PlayerView: View {
     private func remoteSeek(_ p: AVPlayer, to t: Double) {
         let d = p.currentItem?.duration.seconds ?? 0
         let target = d.isFinite && d > 1 ? min(t, d - 1) : t
+        // Seeking from the phone is deliberate, including a seek back to the start.
+        playhead.movedOnPurpose(to: target)
         p.seek(to: CMTime(seconds: max(0, target), preferredTimescale: 600))
     }
 
